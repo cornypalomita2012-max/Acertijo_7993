@@ -1,0 +1,1481 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terminal</title>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Share+Tech+Mono&display=swap');
+
+  :root {
+    --primary: #00ff41;
+    --primary-dim: #00aa2a;
+    --primary-dark: #004d12;
+    --red: #ff3333;
+    --amber: #ffaa00;
+    --amber-dim: #aa7700;
+    --amber-dark: #4d3600;
+    --cyan: #00e5ff;
+    --bg: #0a0a0a;
+    --scanline: rgba(0, 255, 65, 0.03);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--primary);
+    font-family: 'JetBrains Mono', 'Share Tech Mono', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, var(--scanline) 2px, var(--scanline) 4px);
+    pointer-events: none;
+    z-index: 1000;
+  }
+
+  body::after {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.4) 100%);
+    pointer-events: none;
+    z-index: 999;
+  }
+
+  #terminal {
+    height: 100vh;
+    width: 100vw;
+    padding: 20px 24px;
+    overflow-y: auto;
+    position: relative;
+  }
+
+  #terminal::-webkit-scrollbar { width: 6px; }
+  #terminal::-webkit-scrollbar-track { background: #111; }
+  #terminal::-webkit-scrollbar-thumb { background: var(--primary-dark); }
+
+  .header-line { color: var(--primary-dim); font-size: 12px; margin-bottom: 1px; }
+  .header-line.copyright { color: var(--primary-dark); }
+  .separator { color: var(--primary-dark); margin: 8px 0; font-size: 12px; letter-spacing: 2px; }
+  .output-line { white-space: pre-wrap; word-wrap: break-word; min-height: 1.6em; }
+  .output-line.error { color: var(--red); }
+  .output-line.warn { color: var(--amber); }
+  .output-line.info { color: var(--cyan); }
+  .output-line.dim { color: var(--primary-dark); }
+  .output-line.success { color: var(--primary); }
+
+  .input-row { display: flex; align-items: center; margin-top: 2px; }
+  .prompt-char { color: var(--primary-dim); margin-right: 8px; user-select: none; flex-shrink: 0; }
+
+  #command-input {
+    background: transparent; border: none; color: var(--primary);
+    font-family: inherit; font-size: inherit; outline: none;
+    flex: 1; caret-color: var(--primary); line-height: 1.6;
+  }
+  #command-input::selection { background: var(--primary-dark); color: var(--primary); }
+
+  .screen-flash {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 998; pointer-events: none; opacity: 0; transition: opacity 0.05s;
+  }
+  .screen-flash.active { opacity: 1; }
+
+  .corrupted { color: var(--red) !important; opacity: 0.7; }
+
+  .screen-flicker { animation: screenFlicker 0.15s infinite; }
+  @keyframes screenFlicker {
+    0% { opacity: 1; } 10% { opacity: 0.3; } 20% { opacity: 1; }
+    50% { opacity: 0.7; } 60% { opacity: 1; } 80% { opacity: 0.4; } 100% { opacity: 1; }
+  }
+
+  /* Menu selection highlight */
+  .menu-item { color: var(--primary-dark); cursor: default; }
+  .menu-item.selected { color: var(--cyan); background: rgba(0, 229, 255, 0.08); }
+</style>
+</head>
+<body>
+<div id="terminal"></div>
+<div id="flash" class="screen-flash"></div>
+
+<script>
+const T = document.getElementById('terminal');
+const flash = document.getElementById('flash');
+
+let inputLocked = false;
+let currentInputEl = null;
+let currentResolve = null;
+let commandHistory = [];
+let historyIndex = -1;
+let systemCorrupted = false;
+let currentMode = 'normal'; // 'normal' or 'emergency'
+
+// ─── EMBEDDED DATA ───
+const PDF_503 = "JVBERi0xLjQKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSIC9GMiAzIDAgUiAvRjMgNCAwIFIgL0Y0IDUgMCBSIC9GNSA5IDAgUgo+PgplbmRvYmoKMiAwIG9iago8PAovQmFzZUZvbnQgL0hlbHZldGljYSAvRW5jb2RpbmcgL1dpbkFuc2lFbmNvZGluZyAvTmFtZSAvRjEgL1N1YnR5cGUgL1R5cGUxIC9UeXBlIC9Gb250Cj4+CmVuZG9iagozIDAgb2JqCjw8Ci9CYXNlRm9udCAvQ291cmllci1Cb2xkIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nIC9OYW1lIC9GMiAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjQgMCBvYmoKPDwKL0Jhc2VGb250IC9aYXBmRGluZ2JhdHMgL05hbWUgL0YzIC9TdWJ0eXBlIC9UeXBlMSAvVHlwZSAvRm9udAo+PgplbmRvYmoKNSAwIG9iago8PAovQmFzZUZvbnQgL0NvdXJpZXIgL0VuY29kaW5nIC9XaW5BbnNpRW5jb2RpbmcgL05hbWUgL0Y0IC9TdWJ0eXBlIC9UeXBlMSAvVHlwZSAvRm9udAo+PgplbmRvYmoKNiAwIG9iago8PAovQ29udGVudHMgMTUgMCBSIC9NZWRpYUJveCBbIDAgMCA1OTUuMjc1NiA4NDEuODg5OCBdIC9QYXJlbnQgMTQgMCBSIC9SZXNvdXJjZXMgPDwKL0ZvbnQgMSAwIFIgL1Byb2NTZXQgWyAvUERGIC9UZXh0IC9JbWFnZUIgL0ltYWdlQyAvSW1hZ2VJIF0KPj4gL1JvdGF0ZSAwIC9UcmFucyA8PAoKPj4gCiAgL1R5cGUgL1BhZ2UKPj4KZW5kb2JqCjcgMCBvYmoKPDwKL0NvbnRlbnRzIDE2IDAgUiAvTWVkaWFCb3ggWyAwIDAgNTk1LjI3NTYgODQxLjg4OTggXSAvUGFyZW50IDE0IDAgUiAvUmVzb3VyY2VzIDw8Ci9Gb250IDEgMCBSIC9Qcm9jU2V0IFsgL1BERiAvVGV4dCAvSW1hZ2VCIC9JbWFnZUMgL0ltYWdlSSBdCj4+IC9Sb3RhdGUgMCAvVHJhbnMgPDwKCj4+IAogIC9UeXBlIC9QYWdlCj4+CmVuZG9iago4IDAgb2JqCjw8Ci9Db250ZW50cyAxNyAwIFIgL01lZGlhQm94IFsgMCAwIDU5NS4yNzU2IDg0MS44ODk4IF0gL1BhcmVudCAxNCAwIFIgL1Jlc291cmNlcyA8PAovRm9udCAxIDAgUiAvUHJvY1NldCBbIC9QREYgL1RleHQgL0ltYWdlQiAvSW1hZ2VDIC9JbWFnZUkgXQo+PiAvUm90YXRlIDAgL1RyYW5zIDw8Cgo+PiAKICAvVHlwZSAvUGFnZQo+PgplbmRvYmoKOSAwIG9iago8PAovQmFzZUZvbnQgL1N5bWJvbCAvTmFtZSAvRjUgL1N1YnR5cGUgL1R5cGUxIC9UeXBlIC9Gb250Cj4+CmVuZG9iagoxMCAwIG9iago8PAovQ29udGVudHMgMTggMCBSIC9NZWRpYUJveCBbIDAgMCA1OTUuMjc1NiA4NDEuODg5OCBdIC9QYXJlbnQgMTQgMCBSIC9SZXNvdXJjZXMgPDwKL0ZvbnQgMSAwIFIgL1Byb2NTZXQgWyAvUERGIC9UZXh0IC9JbWFnZUIgL0ltYWdlQyAvSW1hZ2VJIF0KPj4gL1JvdGF0ZSAwIC9UcmFucyA8PAoKPj4gCiAgL1R5cGUgL1BhZ2UKPj4KZW5kb2JqCjExIDAgb2JqCjw8Ci9Db250ZW50cyAxOSAwIFIgL01lZGlhQm94IFsgMCAwIDU5NS4yNzU2IDg0MS44ODk4IF0gL1BhcmVudCAxNCAwIFIgL1Jlc291cmNlcyA8PAovRm9udCAxIDAgUiAvUHJvY1NldCBbIC9QREYgL1RleHQgL0ltYWdlQiAvSW1hZ2VDIC9JbWFnZUkgXQo+PiAvUm90YXRlIDAgL1RyYW5zIDw8Cgo+PiAKICAvVHlwZSAvUGFnZQo+PgplbmRvYmoKMTIgMCBvYmoKPDwKL1BhZ2VNb2RlIC9Vc2VOb25lIC9QYWdlcyAxNCAwIFIgL1R5cGUgL0NhdGFsb2cKPj4KZW5kb2JqCjEzIDAgb2JqCjw8Ci9BdXRob3IgKGFub255bW91cykgL0NyZWF0aW9uRGF0ZSAoRDoyMDI2MDMyNzE3MTczNyswMCcwMCcpIC9DcmVhdG9yIChhbm9ueW1vdXMpIC9LZXl3b3JkcyAoKSAvTW9kRGF0ZSAoRDoyMDI2MDMyNzE3MTczNyswMCcwMCcpIC9Qcm9kdWNlciAoUmVwb3J0TGFiIFBERiBMaWJyYXJ5IC0gXChvcGVuc291cmNlXCkpIAogIC9TdWJqZWN0ICh1bnNwZWNpZmllZCkgL1RpdGxlICh1bnRpdGxlZCkgL1RyYXBwZWQgL0ZhbHNlCj4+CmVuZG9iagoxNCAwIG9iago8PAovQ291bnQgNSAvS2lkcyBbIDYgMCBSIDcgMCBSIDggMCBSIDEwIDAgUiAxMSAwIFIgXSAvVHlwZSAvUGFnZXMKPj4KZW5kb2JqCjE1IDAgb2JqCjw8Ci9GaWx0ZXIgWyAvQVNDSUk4NURlY29kZSAvRmxhdGVEZWNvZGUgXSAvTGVuZ3RoIDE5NTkKPj4Kc3RyZWFtCkdhdTEuZ01ZYjgmO0taUCdFZSFJJCkjUGdTbF4rTTc3Zm1ZYiwkTXE3R1NAJTs/QFlrPFFLPzdwdXNrNU1BMGJ0RyNHYTYsUyFWXjVBMHVrQXI0PWYjS3FVOF4mU1FLcGI1JCIhUUBQb2A9cyJiODtdNENWJipoJ3E9IV5LWmIsZDptNTVQWClmUS5QRjVGYFYlM09LIlBuT0tpLzE2WlVsbUNmLyo3LDlsNWUjWkhMPy46Zm1lUGlNNFhtIWRIJSxMW05kIj10R3NHYSw1Ik1jT29DPmQyXVc5VUVoNUVLLy1aUFlfOS1IKS4tQk1oLjEvNWVcKDhrImhTZ1NVZFVNMks9Q0VZN2lhWixoLXE1aDpoTy1AYTJnLmJCTkNXVEUySmRUaUo1KDpYOCxuVXVnMjlOWGxVcFxrKzJRcGBcIXRKY10lN1l0MClORTYjayExL1wlOzEpW2spRm5fJmdna04+cGFoUlNFNTFvL1k1SCdGSGpkZXBqNihMSFZzMilNaU5zRicoblAwQDx1MlBrYlZ1ZUFwSGN0U0FtIltMb04qclQzSjAsX1AyayglRHRWQFg2OVpLSUJORUUqYV9hc3JJUFgjMHIjSTJVQ1VHdUc7MHQkWywhQExMMiJcKig1NiNjNiZGLDdTPiFqQiRqS1FlVW0lPi1qOV4saGpgcEBHPjQmN2NYY3NqJFtNLzw1ZlgsRkdOXytaYDssMSIuSF5ITCc7I2FFU21cUU5kQkNYdCphYmd0QyZtU1FyOTxYTC1XOVJiLWdtU11nW0RoX18qLCI7UihxayRsJT0yOTMmIUEvUEUrbkVmM2hXSFBwWkwhT2lUJS0vQiheQ2lGKmZLdV1ScFpwRFhTW1Vbc3BOa0JDN1teSSFqUl9Ea0U+ci0qNVwlXjQwOCZDMzAiQUFVWDxXSlhhcD9yUFMkP2o0Py5OaENbXlRnV2VwQ21iK0BRMTs5U29bSmdSW2lhSG83cTdJIkFnb2lxKkRKclYiKCFQLF1lU05QZWFPX08yMFV1ZGhTXWNgU1YsdHRGK3FCaytAOThrP2RDJ1k3X1QvNWBfZUIkJFolJVpHN15tKzxpITRjVl1hLT0lXDpmMGVvJk0xLjUrYXJDXlk+PFEsK0BUb0UzTEZOcTJDN0hgbyxJI1YhXkBhUk4lOFdeL2A0SVNEJW9PKy4oSUhxSiVcO001YW9FPmRFX3U0LURrLmdUYTAhMGhzMkZQaSJuMVhdIVklPFZWJ2lDP0BmLDZkOyRiJSRgRm9HYGFwTm9ALWsjLCtZVCJQVFBlRFwibSxKQTtOcEVUZy1iIzNlQXBFVWdqSSE9akUxN2FWYTRGLEguQGdxblphbz1AKjloZSY4UiMxMU00c3MuKF8tYUhFczQhIUQ8VDYzSV9CQ2AvTlskKUlOVix1IyguOUBUaWE5SVRwcCQhbEEoRDxOYydiMk9GRVdmajRVPXU1OUVOWV0qcTMlQE8nSyVfOT1qLTglKTVuZ1ZKUCVbIlYhNjQ4Jz4iYS9nLywyXVowTScuajc6Q1xyO1BcKHNlOmI/WlszRlMqQj1xLTxrUip1LE4sa2orbltJI11hRjs/RjVBKnVoJSVVInNANTxtVl9cMm0iQyU/XCdkXU9oPDFwU05aP0lXb1hacjFHQC5ZIT1ePCF0JV9AOXRbaWdtNXFoQzZaJTcrQz5ncygqKmg1XCZiaXE9Z2pKPnFuYipxcSlDZGM4Vj1GUWFDIzoqZ2tfSS1bSHNcR01SW1o8ZEhGb11oYmJTMmRoMVVpMGZIdCspcVBkJitHKSdSSFlAKzcnRll1Y0xicitwPkBMUiJdKCc2a2pCMzFjR05uX2ZOMDNQTG8hUFBhK2w8aDM2XUZaQVdaa0pHRVlLKWRSMzgpL1JHZW5uWy5GODJPL29eYDsjWEpHI1I4bDMqWiYuRkQvQDA+NjEtKFpWVF1rdW4yUS9Oal9Hb2U2VyIqTkxiMClSPC9pKHRmWEBmPSZVY0hMIVoiWDxZYE0hdVNnYjojOlRxPj5iWWNscVcyKC1dLT9cJCUtRUExJC80Y2BiUlFKPW8yJllHZDw8bC1zUEgxaGdGLUtEYlpjbmxMb2hlRSk2REEiO2NUNU8iVFNpPUQ6LzUvJzQ9J0YlN1g4Q0NwMkBlRjhDX2hvTmlFa0k2bWM1YSg+PG1EUjpNUkQ6KVRnXSdPbnJdXmU8OmcmWyFaWnBLQVlmaCtYaSRFN0IkNjZTYnBGPVwyXkAxSz9qMzs4K2w/ZWpqSmZWZippKkFnVktiJ1JRa2peIVk9OCNiTUAhblc+NEMwMiJhbVJ0blIuT1wxPEohU047bzAwJkNWWk0zPTJXPUg3U2EpJzsoSV1FMTc4ITZRY1g3L3NELGBpOkUuTzhHJkNPNypfYDAycFQzcVBtQzZdIktRSGxYSGoiNkFkLSc+XTdKOSs3SioqNUVpLG0tSVI0KlNkVlUnXC9tOXFEcWdQLkYiRHNVODgkdWRTcEpwMzA1XHMmW0w/YU1JNWJqTXBCKGtKMFYmWko2Vk1UKEk0dEtxb3NzQ1JVUlNfUWYuIyJoMWchSiFgRCpMVCYwPU8+KGEvMiEvZXU2ViN+PmVuZHN0cmVhbQplbmRvYmoKMTYgMCBvYmoKPDwKL0ZpbHRlciBbIC9BU0NJSTg1RGVjb2RlIC9GbGF0ZURlY29kZSBdIC9MZW5ndGggMjA4Mgo+PgpzdHJlYW0KR2IhbGE+QkFMZidaXSwmLjxfUkE6MWc2ZXJTZmJmRVBpS3BhLG1ZPV1XPi1hN2tJOTchO0gnS0hXSnA1RTJKVk5oLGteOz1tMG41cVllYj5jYFJQam4zYTRqRE1sZzwmVUpYbSY+PGQlLC9QUmI3UW82PV1vIkwiUFhuZFIvOG5uV2VcVCtZTGFqUjFqczhDL0JOMDtCXjNOX0xPPFQ6VydAUEZxMFQlXUVCSy11VCtLSFYlN04vSWoqX2tUUVtXZ00waFdYTUtOSUg5ZWdaVj87RGEsU0ZgP3FJZ2VtUV1VbCNoZDsraEhscj4ubjguaVg0OGBZVlRtVVshSjlPRmxKJCQ7VT1GZF9BPjdMMmorJGQnMmAzWG9cJydmZDE3Jy0xbz02R011THRBS2RiNXQhS0tBQV4iaCEncDpAJE1jJGpgSF1BdU06OUMhJGtFK3VJM0IqOllWLio1SUAjUycuPl1GQT1EJ2dxQHRdI1pbPz5ySDtYal8xKVdaRk1QMzFwaUhsSkoqTDpvUFdXL1FXYSolbWJRWUY3Pi84JF00LilGJzk/YylHKixLVFQ/aUYvLVVyb0hYci8kWl91Mi1dJCVeODJcO0ppT2Y0KE9iMmInZG5zNkVKWjNXMD1SYTpVaSgmcWw7XmYuMDghQWljWXNLMVBtPmhtbUhGPkozS0tfLV9mNCdpU0hAJi80LTFbJ1laWWowTVUkTGUsSihZOVBrUmEsSDM9RXM7RVhhL0U3ZVplVWpMMU8pSWg7WG9rNiNUZGRnNjBqa25NV0g9QSMvdV07VlpCMy4zWnBkI0AkJjFBUlolTXBucWhMTipwaFs7UFZQTmgvYCs0TkduUWg6WkZLV20uOCNnTk8+XGo6LTAxOltraG4rWyVYKkw4P0xNNyoxK15qcWI9OzUpW2kkZ14oREI7XlQxcTNNXyNhc2U/RVM/QTUwSVBaaTUoMWsiREsvNGN0LlwzV0M/bShoYDJlWyYmSCphXCw6YWhAPyswaThmU29YNTdPY0UqaXFvK1JbRkciOGEtXjszbENbQTdKRitCRFM+TF1SWGRsa1VXRmM3RnFZIypkUCRkJkEtNWNpQilrUV9aTENrcEZKI286Y2tZQmlkWGwySWNYdEIhRy1PJ1MzIyswMT0+SFdeMSpgVUpMNTpCNV5GIlkvVFszTiVydUFkOzduTic0TklAN18xY0BEUjhhPSJLUlRPP3FAQC5fPHBFWDElaiJ0YjVXbClpYlxlKmAzOyNAU0NeV2RQQ0Yoaz5FOT1rVFIpNCEwY2MyI2VaVU9LN2ZIJC5TUz8qcUtCKWtaNFg2LGE2TmB0XzEzN2QjVEBBKj1SJzImczZfJmZkLFxAOFdOP0xRPychWjZIW0hfUTs8bkI1PF05RG9dMVMqWFxAaUhrQ1tdKWtXXSxsSjtTbzokPmYzMSZBJ0dJQycoZlBUUTQiPmAjckc/ZUlxJDMwMy0kZWkrW0BoKkooUjBiW1MkRjJyXF1pNSxILW4/WS0saHIicTcsU1YqTyozOkIkLjJRbTktcHF0VHFnZ2k9ISpTJnNoTlQ4Q2srci1xb2FyPXJvISs4MGxaLDxaXj4zamc5Zlc5WGw5JTBuOCYzKiUiYltydTcrVkY0MV5scnBdYEkzN083LC5oSzMjYEMoYz41aUUpbTNUVmhodWtgNGpJXydNJkw4N18+WlwkZTRHTWhia1VCMWFwX3BVRWw+Yid0RmojYChmVTNEWyReQkBjPiptaSVWKWYoXWhxczduYmU0NGReTkFSblBhRlUuUURKOSppWEpZRS5CLy0rNEMoUi81KkJHZUE5L25oOltaVVBIZWoyO0lbbE9jcE9rOUtZWHRjLDhfbzoySDE+PmBuLEUua0xSXDROaFpgOVtPajlRLFVDVGA/YWVIJ2JiInAxVHRQT1VhZUxkTT8hRGJKb1VYIyQiOiY1WFlWZiI+MnUhSGJpaTBNS0glYWRMblU/YyomRlVjW1lEcG1gXmBaLVtbVGdbXjRdbitWWSZwcSJNcChySSE2RyRhWWl0PzxESk43WEUmPlhqWm1MVHBkbklcW0ItQSpINl8tKzwjOGQjRzR0M1gzdCQwOVw0PjFjWT9Naz9XWyxdNmwpUUFPYVRTUTJYYmxtaFs4U0BtPEk9IT9wMEw6WChpREpdLCdAVU9kbVZWQDo4dEtOXykvJFImL3V1UmYoUSZyV0tiXyNtOFUkJldIUV5DZz9HYUhJV0ZoKTk4PyJUNHRRP1ZGT1BFS0ouTmxIYDpzWC4kbippUUQqdW5wYDEoPDJbZChcQW8yI1JrTEJpUE9vW3RgXFElJWBdL0otXW5dOywudFAhSTUnJmxwZV1mQltdLl87SzwxSSUiYXFVP1gvbmU6PzomYS9PY3A2SGxiYmpTUUMxQEZNK2JRYUhyLE9HKGducCo/dDZrVEtIOGROT1h0OzRndWgoaWgmZWFicE9bZV8vVSEmbz9FLD1IPGhUVlJXYS83XDBPJEIvZzZJaEUnaSNmK2pgX0pVWmM1NFJOYWUzPEktbThMMDA+MygsMmpsND9aWUxRWGE0YU5GP0ZxM01sWVshSEBybT1ISUtQaV5uQkRWJTZHRzcsS1IqOCYjckwyZmFgUGhFMFdALTEjR1NbXS5INi9lYnU7YiVLNUYtZE41JnVSOklOJWpAUFVjOikmQDFnUFora1pCYyomVz5qbHM4aFNOTSsuOGlMSlUtMkRdRU1wKSYpYzNyUTdWN14pZGwzcUtHOn4+ZW5kc3RyZWFtCmVuZG9iagoxNyAwIG9iago8PAovRmlsdGVyIFsgL0FTQ0lJODVEZWNvZGUgL0ZsYXRlRGVjb2RlIF0gL0xlbmd0aCAxMTAyCj4+CnN0cmVhbQpHYiFsXTk2OGlHJkJGOD0nS2FkJVNYST10NVMwVCtabFRaKEg/XlxyYVskYDEiRCtCVi1rUFdXcXJuSlpaSk0hU2UzZF9aTDZOZWxxcmRCY0dDZFQ6KzIjPWItLDtrTHBCKGhrNWB1NkNPVW9QRnFUMDM7QkxtKEJWZyNKV1dSX1RkTzxNSkQhNWNjSUxlclYhT0ZPY0NEYiouJ3JCXzM3XCs5VXE+a2YhOF9PKFFsRzhvNTNHVW5QcStNQCkqOEk7bFJHWVVDYU4rX1loSEA7MVJrRU9uPGZVcCJYMlFhI0w9MDUwaFMtSD9oaHFeVGglP183SWNKI2k/Z2ZZSCpRVDZ0QiJsQzMvKzQtZSVcKCxzaWVsIzlZKl84TToqIm1jPUZpMj9kbyw2XXI1J3E+YHI4dVp0Ym1FQHUyI10+J0hsNmpPQCk8JTZLIzVRWDJBPlZqZjpSMTVdbSgqNFVQRTpYVmdlUEgnUmQjMW5GaGIlS04hLFtoY25WWi10U09tVk5iNUNUSVpYN1dmMlY8MlBzYjwnI0QpNFElRVNKMSdPKE9EYj07LCIxP01hPE05TS8oSGddUSMpRzpFMlJNWDVHSW1da1k3JUcxXlBjOS1RRFBKa2ZETWNSQDdMMjw5RHBGKVBTOmtibG0yNiw7YVFULy81Mz1VbipCJ3BhP3UjLyshOkNGYUgxVVpXO0U9OzU/RF5UWi81Sm1AQ2VBdTQ1TzVoSlBlNkQ5VyJTYChWMEBAZFQqJ0JWSSFDYVVpaVBVZSxha2tAMVduKFpcUC5BRC1ALWVuRDQlKipZXV49ZyUlWC9naV40Nm9BZ0Y8OV90SmpBTDpoN0Q4OypWZVoyRihmbmU/NS88SC1lRzh0QTQ+T0UhXj1eJm1OblIwcS1yYUUvbDJUWHVeQDwnQU1JQkVQJGpZVyNOPEM3LUtcV0cuL0lsWC5zMlA1PldnS19gNDFbRVV0MCl0SjZkJT8+bjsxRyooX2VVTjwmQ1FiMW1gSi07WVw5WW9XRlRdVEZnNkVRRl01Mlw7MWklMEY2X2Q4UDZTaz1XM2ZRKVdaPGYlXWtXS1AjW0lPbUpBNS9GSyY/bFFMXmFGNT0lKF4nLmddP2RnR0BeRmRASDZtZHInT1oxdFg1cU0vZjY4Rl4hT1c/N0tJRj9KK2dWQixQSyxcWlldO1QkSkpgYS4xQHEiZzZebVEkQEVsNWo1ZmBLX3RoM0U4MGluVUwhXCdGdEY1SkhxXi9xR1Q5dW0lWFxXKFVUUEJqXSI0MmNiJnJfRWokOWsqN1YqTUFRSjZTITwyIVdwamwlWzdZamY+aF5yMGRzTGopbEwwVk9eU11MUUJFJioicSg/QHJGJGNbJixmW1pzVkZjTCtObzY5IjNzK0gnalY3KSYrMG1NTTxMbE46WCUwJ2VkTy9zSkxFL207T3FHPSZrTixqXmtLIkUrMkIsNC81NH4+ZW5kc3RyZWFtCmVuZG9iagoxOCAwIG9iago8PAovRmlsdGVyIFsgL0FTQ0lJODVEZWNvZGUgL0ZsYXRlRGVjb2RlIF0gL0xlbmd0aCAzMDQ2Cj4+CnN0cmVhbQpHYiEjXz5BckxuJnE2SFs7LFQuXWs9Q0I5aDdpInRAREo7PTZ1XEdPVUtvSClOU1ZnXylmUVJLMXBhckdXdVZmXVw/SD8jZFBCNGdaIUVeIXJwJFFMW1A+VjZJcUo1IzNXby8/XmdITScwSixnQkArb0g6UCE0UUBWbVtgTWJCLjFlcFl1KEpHcDJNVzo+Pj1aKE9YdFJxZ1JKQDZHX2FXOlBEK0M5VllFdF1yVWF1RCRwNztwbDFhMz8/PkxwMFlmV3VNTlNqVyY2Z1ZmbzxXbXBLQi1CZERDMyw2OlViY0NJLTZTZVEkUVU2TzVXVzNBdT8wMSE/UidvOjs2bkUwRj4/X1ZxNkteQVUzYyFOOGU5cWxoJythLFJqOzVkPHU4YGNlOzJPIzpddTxyTFgzbz9oIWFhVF5BbnVANmlTdCp0Sm8wSGEqIjBOVFtFUHBiZEBrTCt1LjJAaUpvYzgmQkIhK29SNW5LamdDJyhGPys/R2hUMXRKVCp0XENLaWspRCk8WlJOUFQtZDtwMUdyXWouYVJfUi1LdXBEUGMpKGBrZGNoLyw1YjIzdGpPRjE1ITFYLiNxYlxeazhgNFQrbGVbJ1tART9MJmJBUSI6IXEwXFcrS2xqR0NfZkdqQVg0RjtMQmwjXDFVMGpqNWBgIjtVWTVuYCFCPyxTImZhOjFQWk8lJGUqZSwyNFVHNkc8cWooUWUuPEhwM0o1ckFCNTwxRnJIR1ZaL0hxVVMsUV1VNC5Mb0JRaz5VXGZpQTEmQjwvb2VcJjZXLlM6TlNLWSw7IlJdOzdCK2ReTGszc1JFNG0rUmZgS2hsRikjbWQ9LSo+J0IyRUpHPzc0b2FTOik1VDgjKWJKa1hGOmRGb1lYMDlbOEsibDlmJjNSRklvSXM+ME5qYlJFPGlwWyEiTVpDJmFtVElrUC9BKyFeY14pNSomXDZJalBxPi51RCVHPzgnbWsjPl8qUEsiPzZkPHBsTDM2KmE5RkdBVFdlIltgUW5iPTQpXEM4JkJSNlk/NzQ0dV4wRHFTcDYzZDRoR2Y1Ji5NcTJWXjhkUlVGMj5pY2VicTZHPXNfY1FzRTkuXztjbjE1YS0oUTZuMzImPmA7MUcjSElRKCUoRFlIWmAoaFgoKi5uXzBSUWooLFNtZHJUQUU1QzZcQktJbC9dOzEoKFQ0OiE6LENeO1InLkFSMSNwbm5FMyM+PkdpIWdRKWFLOjBQWCwkRT4tQm8kJ2Y4OTpGWllacms1I2ZiZWk+K2I4N2orLTBCMToxTDBuVj0yLUpKPjxBVWo9RG1HTF1wT3FaJ2spRVdWWDppc15sJDo5X0lnKltBcFtFNUQnMC5YZkUxRUUnPUE7RTdzXihZWDNMJ00+LnMhKDxbaCtGS3ROWEY7azNGS0BTMEkvR10hNzVNPzJSMV1LVzZNS1ZZYHJpTigoIVlJWytSMkVOSS1KXCRITztcODFHMVojKSgpPElVJF1EWW1ZTEJhZkk2ayovPWUzSSg8PCFTWSNDajFvWyY8QWEjNkU8IW8nQ05sP0tyKypOYFozYWdeZTFsIWxnJW9DI0ExQSNFLWAzQFRjbV5EIlB0QlEtaVBsYSJZRkhhcl9AMyRqcUA5UklEO0w/PCRASzgsNVUqKnJJRWJiUnBCaFM8UTBqcD0pLWVmSEZHPDAmTS0kT2hhTSUpVUJtYDtFOlROIWwrZ2dsXk1lRDs7SFBQQTBeUCpYSlFySTBwIU1ZXmhTLmViQyZSS2cqRVUrb21bQFNUXFYtX2lDWyxAbSxhcT5CPVRIO21LPjpEZC5PTjIhJHFrTzNpL0VpaD9aT1UyQ0N1ISpkQTlsUypeRmdbNF8pPyZcL3RBVy5iLV9yWVknUlZHX1FHa1tzbyVXWitBLko9UyFjdFBcIVFoTXVFZTo2Vio1JHRiP2ZcNSdkTkhXI3VrUG9mcltbTHVsVD82Nzk6YyRcR2FZXnRXZCJbPSczPzo9N2FLU0Y0S2t1LzxlL1dxOVRDREQma1A1LipZLVZYLDs7b3FKYyJCczRjUW9IXVgrYTcpJGQ6N0RsRlZvSUYjLGgrUS1WbC1gYyYkKmpKJFUxNCF1UCJVMStJUXIlIzdXS24lSz9vM04yS14lXVkncUg+RSNoPUhvJUIvclZcI1JGJ2kjRUwxOCVeXldGJTsqJTRtOy9DOT1jUldiPUpacjFcaD9AdGcubmQxLWVnUCYtTXJANUJoZ1lcaD9VMTRlT2trR0ZsdVU2IjVCa1dFLi5QNnE4QTc0VkkuSjVjIShPW0FEWT8iUGhjNXJfX047ZSdgOz8uTFBPPyNNSlE0W2VkPVVEVDJALGtTbCU4SzdeV28jaFJBVS5GVjxeMVdIMWVeIjxqWEU3TVpmTT4uTi5JYHRFX0ZrREttOjUlYmJDPjVYZWAtSVtRPS1GbmMjYXQ5Wj8lJTJQakw3MStDL3NuQUUpYiYiJFBwamo1UGRPKjBkLXI/SlZcRzIzR2kvXGFNS1NyKTgkblxIVCFBZCtHanJHLz0kMihOZkIsRkY0WF1FSjsvL2gvVFI1PExOS24rLl48KCtbXW8uZUEzaGBMLz9AOFVyVy03PkpVXE9MJWtqR19EVllWJlA2RnArU1xcZltNQiNEXzlacUdQUkFDJmtlPiorZ2tSSzZha0olZE0kKnVpcVJIPSgxXF00JCNCQCdfJT0zNS88SWxbbThhMTUrS1lmTmQ8MkZOXTplZi4nZU9MZCQlM1tQbkA0YD4yXllcZWtiLkFENGJsV1hNJS88MVEsUTh1LkkkZ1VjK21dUE1UYjVxN0IrSnBhZFYqaFUiKW1GZmZFcjdFKFlcZi9WU0NPalBzSEV0O2wmbz5qSisuNGQzL2VhPXQzNklfRlM4aEw8Kl4vTkY/Lj47N2U1MF5EVkJSZVUhLU9uPyZ0ZEtLZGxrPT9WR2cxc1QwI2o1JjVJJ2slV3ApZDgmO0ImYlZebig4WkI9Xy9aX1w4NT1bVU9sc2peZmVMaCskKmdDSiooX05UV0JcSU0mayMqSjVbOzdxOi8kZWFqYjE+XC8lcSc1Pi5nJzlPP2FaVy8pWThzRk9fSGtSQzRWayMoVElXbGFXT1xDNiIjQUpnQGg1PD1YNjshV1IpQ2NXL3NMQiZSRHRcQypESS1oNSxVIlBHPSpSM0JrVj84U2RMYGc2Q3EnamVabVg+RSs8VyVGcU9caF1LKWpeOUxzaSNFaTBqZ2V1PXJBLERZNSFcUzgpWkEuWmFTJVlybU0wOjAuZjMqYmRmWD1iWycvXkBkWFglNFRgZ0RZYk8xLEtrMDhJaiY7XV0mVis3OTIrO2gmS1NjVGxbbEY3aEJQaDlIRDVFdSNcUjUoPlRZUmNEbmsnIkBJR2wsS1hANy48dHVORT9bXzdkMDRRbUwjOV5DcXBlVD5UVTotXCRyPCgzUl9IczRCaXMzazssXDduMkJFNDRwYzkvKllTLmlOTyRnKCZzIWo9JF4oXDheNXI0YiIzJ2NSXjlXJHFRWEFBKUVMQSM/RGYtOk1jZzcvWEFLJmwyWU0uSWshK0pWLDY7NVhdY2BHWzApVCxjLGQ0W19nSCdQbjE4X1pAaE9BQzRKLSVzP11sRU1pYUduJHMrSC89cChEdElNN18pRCIkL1dHJiFAaTpvWkVRaEdKQWMzT1RUcVhANU05NT9yaCIhX04paklCOEBGTFxkakdUPC9oUThvbG88LEZIIzs2NmJNWVc5Q0VPbVc+WGU+PTtnNFdGUC1FaWlhNFJmXzA9NE4+UlBgbEJCV19TZkFRRThuLEJQTiozcWpBYWBwQ1AvTURPMGRcUSZFdDI6TilcZ1FENTBQTjgnJD9NR0Q7NUJhOjkuIkJzIytXa0tOIjBVJzJ1NDNbXjVMVm5CMzByP1BFbT80YydCc1cqIkk5cUVQODpRMjAoYnU4aTgjRidVP0BUKUQuSkszX3BEckkoaCoyPi5xbGtQMUhdSWdaWCxoMG8yKWtELD0uIkhHX1xBIyUwN0dqRGtWRFZBSio7WG86WmArPG5FR0UrLz9MLH4+ZW5kc3RyZWFtCmVuZG9iagoxOSAwIG9iago8PAovRmlsdGVyIFsgL0FTQ0lJODVEZWNvZGUgL0ZsYXRlRGVjb2RlIF0gL0xlbmd0aCA0MTk0Cj4+CnN0cmVhbQpHYXVhRDk8Wyk+JnIkKVonYSxjaEc2NkZVO2whSClCJldoRD9tTFk4YmZVa2YjNyhrb28pQk46UGpjWy1jLXRLVVpdbiVDKG0oNUptXU9VMGw7UFlhYV41ImxZUSRpZE9YMHNTOFVnU11UJmA/MkVfNWllNl4+PDM4ajl1JXFpSSlULDJYYHI1UUNaTV0uX2NvbFdzSV9CXjBIXzxyJU5aaDZrQHNrTikzT11CXW9hLGdXVlAvSDBrKmxMYllBZjcwN0RUPEVIYipMamdXOlJOTUdwMyozdDVALzgqaFZJMlViPE0vVmhuUWVwZSQhW1M6SWZtSGomN3I6KTM0MTlwcF0vSHFxalVTRlhFXycrMHRIIkEzL20hckNMNXAoSCQoQ0MpMVA7ayhlRmE5MDU2NWpiSC5lWS1NLlVjMSQpVzlzYiI1WiJedHBpX3UzOWE0bk1QMnVDJC9wQ0RPITtfYGBNcGdKU1RmdDYvMTxkKyZsMEMlNStwUzVLUTciTzQmX0NzRFVwMidEOlVaJDc5PFRCSSJUI183NzRuaCcvPz9kZkRubD09cGA0P2hDb2Q2QXFVNG1UOSgpdC9eUj0+OiVoM0FbXFRoNnB0JlFBQmQsImZoajc3JTZnPGBbJF9bQGQmZmwxQixwLDU/MTsuQEp1NixMRFklY21rPScjTCFfSWFsa1ltL2Nta1M0NDdOOl5oVl1kU2RAN21bVllfN2tyNz87MGclX3FacyQvay0vQ05RLkRnUzBkRThuNSNBUmpLazNtZU9BbUw4JVNxMGNzK15gc05ISGZJYlgsPi8hbjB1Omk3RCVaLU4mSSltbHJTPCs0S11mJ3BwZj9sRTdJQSxsSTAuPC5kL0dCRTJoMVRfY25AXCpNRmFxM1phWiRBJlxacWZyJiF1QiInSUwsPiUkN2AyIjZ1XEExWmorXWlrcEM2WWBcOytmTXA6SipVI1BxS2I0NkQyTDdkKjM0Ti88LExxN3VtaitOY1MpVkAxRCZzNSNWMWAwbipjMkZmL0siJGZYbEJuIlplTU81Oi4zTF4sN1RhL3BePyNiSTxlUE9rUkoxIk9oYS8hLiFmV2ciYS9VOVBJQiQxdD1CU2xyM0pnWClQW1MnTFg0IkZKaCw4X1hGRlopUz5eZUJFbVJoSjAlT25ZISxOVSo6WmVdYj9eKlFLTVlOUEpXNyk+Z2NQbCM5QGEtT1IkISohS28lUnJKPUxITW9sT1MvUW9IJkw1QEUnb3IpUVYnO1hzN2ZLdDtgM14+UCdqLiJudDBVU2wxLWBXXyRAQjVTaF9FQXRUbSNbUGY1QlpbMVc1PVA5VUUiXCdPSnBbMCFIRDVVOG0lK3FUO0UrLE0mX0REXXBpUXBdazxLLjMnV2NkI2VkRVZccUNyZGcwa18xPCxJZzVOVWo5KC08S1ooOElRaVAkU0dxWEVhX3A+R2J0czJGI21oVF4pT00uWSUoZGAzMkF1TCxpLyRvLWxKSW9TWloqdC1FMGVYLjVEMGc1bGVNWyRrODd0Lm9UMUVwP1xkIUtqKSlBZi5tdVNSYDJwI2Jdbm5xSkYxWFlZPk46byhxbU4xb3RmPWc9PTUvO0M4aFhGUmI2MkBmRy9XYEM7T0orM2pSQF1kTENsPjM3YzBZWFIqcDteJUBGKGk9NEhPNCc1JG48ZV1fQWZPVkAhUENbcy1iYWk2aiwkJkM7Ni0lMC4zQ1JXNiVgaFJoMyc5KzomLkcjWz9FUF9hYycoKm4yVl0ybzZSNTkqZyhEbEgqRl1QMXBwVC5BU0wkN285XURFSGsyQUcrJy5iKFhcdEdxclAxKG91PyZPUiltMCklZihCbC9LY3RGMS1BV1ZkQ1dBbXNtMSZNUWZAJ0c/XzhSQlk9MUJUT0EkTDpVVVJAXC8uZVtHIUtENWkocC1RMmFgYTldIjlBcClfaWFNOSYqYj8tJHBXPmZOYyVaR01ZKUpzaSEqbTZEX0BZLSMvOkoqKHUrIT9DREdPVC81WkQsYiFTP0JuZSxwXUZnXFJBV0pXSmAqKFN0VEZbUUJVU240LU9aTSo0Um9EM0pWIVEjJzRDOCchU09KMy5EZE0qa2drWGszQFo0QGt1J3JPOV5ZXGw/LnArWU51PC5STGQ+dVQ9SVdmWGkhWEdObCEqQkhRcm48cjpuaUtgUStcVjIqPyM5ZTQoVioiaE89aCUkJzw2LjJmVjNyZlwqNC4jIzAoPkQyZTExNShsN2dncEtzYVAoJypkY0FpQk9NWjQ5ZEZyP3UxI2UsNUhMbW4/aDoiXzkmNyI1JmchUlxHNVA3ITgxMnJQKTpPTl1dLmk8YzBVaF0pUmQyPGchTDE+NykiVS4xKTc9KWhnWiQzOk4lVnFaaTojRDJrVHQuQ1RxbWcvOTdBZFE1UTpbQ2g2VzVTLG1OUzEqNS9yRipfKEVvblBxNDVyZiJhT1IrbWJsaj1HK19MYFAzM1k8OmBaVG50TElVYWU6c0BVO01Db0cnNz0tImtNaixlZnU2Wmg0XEIwL05QTCFSXCdDLyNmXkBkVSNVaTVjcFF0QCRUR0lPOF1NKSY3MTo/ZFEpaG5dIWRrV1ZBRixHOCgjNSUrM0lZXVpmY2YsZ0wvNT1vIV1yXUQ7KyFzbkJocjFNRz0rK1ZAdWlZYSNnXylQJlVfSCtUPTU1QkFoNGowK0giLl4kbi8+LiJkQXReOXEqNm1VdFZmRUxXQk9oODxoZklAMzkicWQmTlY6OU5jQSQvOTo2b2NXJCJZOzlUTnFsYUdGKFkuR2FhZkx1Ik0tSV80PmttI2xnQWNcXFloJWRZIXBRJ0dCX1BhXWAvOiMrPGA8aD9hRklLSVxcQD4lbE8uaW5pRW8xO1RAL1JoSWJQbk82aTNUVChqaHI/dSw6cnRzUyslMiw7c1hfN0dlR3I0V0QyQyVnSUtoX18nQ15OTHByUz5QU247LFMyO2RaTXMqMk05bGxRbCVuQF1tKWZnSl8jPCpydCtzI2w9QyMoRV1OY1lxOlVdbkVJXmMrS1wpMVhNWWVdTlcpZDJwYCYxKU9ZaUw0SkhuXHBqR1NAJCMmJiFCOXQ4TThoMGM3RWlYYm1jUS5JISckQmc3ViNIPWBcLTQxKCxPPipFYihUdEh0XzdiLUpLNSVubDJwYWJdUisyYz40UVZBJltvdVhhNiFrMU01Tm9bISVWakBhWz1sTlxRQmtFRyRjQGkrMk5FYlpGOUReRyZHUUYzci4qPy5kaUxMK1VbUzFAb19cWEsqczFmPj5NdTFZVDNsTi5COTVGJ2EtPWtDcDM4Sj0uZjE9bVF0OTchcl9NRycmPUVOJyZDRENOL0cuN1hqRiwxciVTVyE4dFxRaC0wVGknaElUKiNmSEpXJjFHQ1InJDloYC4hW1AyPnNtcCRHKkldPlxFdTZiR2cvO0NfQFFkJD07WyIsUmUmVjpGbVpBOCVnNnFoayc5Q0IuX3Nrc0YlUklzXz00VU83VS86bDo/VUUvcFVrSUhPJ2kySVlyPTMuWlo8IitLTklpWFc1Qy5uPUFeRT1YRj9RWmNIW2krIVQ+K0BUcCVAMFxZcW9ZWHNTMEAmVEhUJTNoNHFzL01ITVlFKDc3SXAtKyJiX1AwUGlZO1VBXjZKWCpYY3RxP1FfMlNqTzNTN1c8b2ZzPk9hbWgiT2tAdTYmL2w6SXROcz9NUEMsXFdOckVeOj9NVEtlZlpFOShLPmhKRms5Zz9LIlt0QzoqX2VxODI0PCxURFY4I14oSSNwT00nQUwtT29Ga0pkRz4rNDE5XmNKTysjPCYlWCM7L0teNFQxITtnJlImLScwVW4uVydKTURTbnE5UDFOOlVOLVpxWmFwbSItVklCOyolISQ/LThbbkJwX0pyLExPXTQtWEo6TkNaLzYlKydJXD8+WSMnYWtpOUk9LzQ7RDIsJCMyJSU5SmVbQjMpaiU6Py1UY2V1VW1vMkpXbyIzX11maClpWz9EKCUjK1AzSjpKMi8jRShHUmIndUNaQTJBby5ibkciNj1mLklLV2VKSEFzZCcmPlJuSyUoZChhWm4uQjEsNEhGOCEjQiNbQ0gpcG9hN2IsPU5KbWVaK0RoR209L18nPWgrMkxVIiMsQVYyXVAlLGRqJ2JfU0coRiwhLSwxXS48VGJkPVpoNk5TMkZQMllcIldCVztdVUlINllxOWI6VFRERyRcOUVVb0VYcSFQaSMhMiJHPENKN2lKdDVZaVVKUys0JUghI2syblV0MUtvbkkrRHFDPDBUPClBU14+JiE5NVE5R0dMY0NFYT9mPHRHSk9KQGkiRmY+QE5KQDdVYVE4KEAyZyk6VTw+SURNXHVLSmtlUmMqO2FTLjpJVjhpWUVRQjJdUCRPL0wiJ2BQb1c1ZTkhbV45L2k+SUw+NlMyIUZkISgrYl91UmxRJ1o7RSlxUidoZy9WQ0tCckxqSSJkZkotMypBVXNoJDtmUDkmNzJKXnJJS0kpJERrTllfJU9oIXBsSikuaT1UWlJCKyMqaDlWU208PWckI0ZHVTZJWF0kY24uKFE+M20jJE8vPEdLcmtOciRacVNxYihhTXR0RmstOGNPRTROSD9bVCgzXiJFNUFnOnJWRz5YZCMmXDlITVRUVWtHUypITXBoNVomOXEkWDYhO3FMRy82SiFhdSJdX2E0PW9HUmBIZklPZXAjXVBAWS1lbTNVPCItT19AP1VZOlpVPFxzTFhPa185Pyxab2goV1pyPGYlTjlCJmVVMyhBZ0o8aWE7dDZYL3RTZW4sXmIncVNONmkiOyxNaWdYUERFQ3QmTWxVWSxQWiJGM0U9OFFNMyFiKilnTyg7aUtoQTg5Xk1JazVxTkhCXkUsSmJiTWZNZlMvM1peJTEoR24pX1hxPiZGWVw1LUVfYGMhbytEWmBaZmdQSVxAQVtidTheYktGb2ZZSTpvNlBJQGNkW3NFOm80PGQ1XC9wJVZaSFNmYWJJQHQ5MlIkJjBfbzYhdW5DVU5oKUwkJ19gJDMkYmA2V0MtQyhCSHRPJWVPbG0sN2dENl5TblU2J29rTD0+XC82WkhYKCJWU1pgQVVNYkxBU1Y3ZmVBVUBIYC4qcE43Pk4sLkFvPWcscnJvLSchKEN1Q0RWaS9fRD1mZHRSbSY/KHRRbTw7QF9gRlREKy5nPnJYMy4+Vk1yaW9rSFQ3YG42SzhWMik7Syk7XmU7cmRzKXFiLVQtKk9naldaO3AkWj88WCopV1RtTyZlWzowKVRbUDNGWWNDIVM+SG9FU1xZQmo0JmNEKXAzRz1wbjdUdC1XW0RPbFtwQkBuTm8nP0BrOEpjYSYhVVhCUmcjXTxSXDlyLj83TkUuZj8+XiV0QEZlSiRDI0MqZk5AVWpoI0MvQyZ1SV9PYCwvZklWL3RFcUokK11ycD8nSGBVMF0rcCNwI15VLFZySXJNaEU7cFdybE1eJHQ3UzdTPk41b3VHYVpGIUgyM3BwaHNIVEI5S25QUkktPkIya25rSUNvLypjZVpXO0JkOzMlUiU5QFw4alVZcU0qLFxmT0NyVi5rQzNaPWVeKSFqUzRONT0wNz9iV00/fj5lbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCAyMAowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwNjEgMDAwMDAgbiAKMDAwMDAwMDEzMiAwMDAwMCBuIAowMDAwMDAwMjM5IDAwMDAwIG4gCjAwMDAwMDAzNDkgMDAwMDAgbiAKMDAwMDAwMDQzMiAwMDAwMCBuIAowMDAwMDAwNTM3IDAwMDAwIG4gCjAwMDAwMDA3NDIgMDAwMDAgbiAKMDAwMDAwMDk0NyAwMDAwMCBuIAowMDAwMDAxMTUyIDAwMDAwIG4gCjAwMDAwMDEyMjkgMDAwMDAgbiAKMDAwMDAwMTQzNSAwMDAwMCBuIAowMDAwMDAxNjQxIDAwMDAwIG4gCjAwMDAwMDE3MTEgMDAwMDAgbiAKMDAwMDAwMTk3MyAwMDAwMCBuIAowMDAwMDAyMDU5IDAwMDAwIG4gCjAwMDAwMDQxMTAgMDAwMDAgbiAKMDAwMDAwNjI4NCAwMDAwMCBuIAowMDAwMDA3NDc4IDAwMDAwIG4gCjAwMDAwMTA2MTYgMDAwMDAgbiAKdHJhaWxlcgo8PAovSUQgCls8ZmEwZDZmYjJmZmRlN2UxODBiZDY3YjQzNzQyYjYzNTU+PGZhMGQ2ZmIyZmZkZTdlMTgwYmQ2N2I0Mzc0MmI2MzU1Pl0KJSBSZXBvcnRMYWIgZ2VuZXJhdGVkIFBERiBkb2N1bWVudCAtLSBkaWdlc3QgKG9wZW5zb3VyY2UpCgovSW5mbyAxMyAwIFIKL1Jvb3QgMTIgMCBSCi9TaXplIDIwCj4+CnN0YXJ0eHJlZgoxNDkwMgolJUVPRgo=";
+
+// ─── Utility ───
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function addLine(text, cls = '') {
+  const div = document.createElement('div');
+  div.className = 'output-line' + (cls ? ' ' + cls : '');
+  div.textContent = text;
+  T.appendChild(div);
+  T.scrollTop = T.scrollHeight;
+  return div;
+}
+
+function addLineHTML(html, cls = '') {
+  const div = document.createElement('div');
+  div.className = 'output-line' + (cls ? ' ' + cls : '');
+  div.innerHTML = html;
+  T.appendChild(div);
+  T.scrollTop = T.scrollHeight;
+  return div;
+}
+
+async function typeText(text, cls = '', speed = 25) {
+  const div = document.createElement('div');
+  div.className = 'output-line' + (cls ? ' ' + cls : '');
+  T.appendChild(div);
+  for (let i = 0; i < text.length; i++) {
+    div.textContent += text[i];
+    T.scrollTop = T.scrollHeight;
+    await sleep(speed + Math.random() * 15);
+  }
+  return div;
+}
+
+function createPrompt() {
+  return new Promise(resolve => {
+    const row = document.createElement('div');
+    row.className = 'input-row';
+    const promptChar = document.createElement('span');
+    promptChar.className = 'prompt-char';
+    promptChar.textContent = currentMode === 'emergency' ? '!' : '-';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.id = 'command-input';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    if (currentMode === 'emergency') {
+      input.style.color = 'var(--amber)';
+      input.style.caretColor = 'var(--amber)';
+      promptChar.style.color = 'var(--amber-dim)';
+    }
+    row.appendChild(promptChar);
+    row.appendChild(input);
+    T.appendChild(row);
+    T.scrollTop = T.scrollHeight;
+    input.focus();
+    currentInputEl = input;
+    currentResolve = resolve;
+    historyIndex = -1;
+    input.addEventListener('keydown', function handler(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const val = input.value.trim();
+        if (val) commandHistory.unshift(val);
+        input.removeEventListener('keydown', handler);
+        input.disabled = true;
+        input.style.opacity = '0.6';
+        currentInputEl = null;
+        currentResolve = null;
+        resolve(val);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (historyIndex < commandHistory.length - 1) { historyIndex++; input.value = commandHistory[historyIndex]; }
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (historyIndex > 0) { historyIndex--; input.value = commandHistory[historyIndex]; }
+        else { historyIndex = -1; input.value = ''; }
+      }
+    });
+  });
+}
+
+function createPasswordPrompt(maskChar = '*') {
+  return new Promise(resolve => {
+    const row = document.createElement('div');
+    row.className = 'input-row';
+    const promptChar = document.createElement('span');
+    promptChar.className = 'prompt-char';
+    promptChar.textContent = '>';
+    promptChar.style.color = 'var(--amber)';
+    const display = document.createElement('span');
+    display.style.color = 'var(--amber)';
+    display.style.fontFamily = 'inherit';
+    const hiddenInput = document.createElement('input');
+    hiddenInput.type = 'text';
+    hiddenInput.style.position = 'absolute';
+    hiddenInput.style.opacity = '0';
+    hiddenInput.style.pointerEvents = 'none';
+    row.appendChild(promptChar);
+    row.appendChild(display);
+    row.appendChild(hiddenInput);
+    T.appendChild(row);
+    T.scrollTop = T.scrollHeight;
+    hiddenInput.focus();
+    let realValue = '';
+    const focusHidden = () => hiddenInput.focus();
+    document.addEventListener('click', focusHidden);
+    document.addEventListener('keydown', focusHidden);
+    hiddenInput.addEventListener('input', () => {
+      realValue = hiddenInput.value;
+      display.textContent = maskChar.repeat(realValue.length);
+      T.scrollTop = T.scrollHeight;
+    });
+    hiddenInput.addEventListener('keydown', function handler(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        hiddenInput.removeEventListener('keydown', handler);
+        document.removeEventListener('click', focusHidden);
+        document.removeEventListener('keydown', focusHidden);
+        hiddenInput.disabled = true;
+        display.style.opacity = '0.6';
+        resolve(realValue);
+      }
+    });
+  });
+}
+
+document.addEventListener('click', () => { if (currentInputEl && !inputLocked) currentInputEl.focus(); });
+document.addEventListener('keydown', () => { if (currentInputEl && !inputLocked) currentInputEl.focus(); });
+
+// ─── Random generators ───
+function randHex(len) { let s=''; for(let i=0;i<len;i++) s+='0123456789abcdef'[Math.floor(Math.random()*16)]; return s; }
+function randIP() { return `${Math.floor(Math.random()*223)+1}.${Math.floor(Math.random()*256)}.${Math.floor(Math.random()*256)}.${Math.floor(Math.random()*256)}`; }
+function randFreq() { return (Math.random()*29000+1000).toFixed(2); }
+function randDB() { return (-Math.random()*120-10).toFixed(1); }
+function randTimestamp() {
+  const h=String(Math.floor(Math.random()*24)).padStart(2,'0');
+  const m=String(Math.floor(Math.random()*60)).padStart(2,'0');
+  const s=String(Math.floor(Math.random()*60)).padStart(2,'0');
+  const ms=String(Math.floor(Math.random()*1000)).padStart(3,'0');
+  return `${h}:${m}:${s}.${ms}`;
+}
+function corruptString(str) {
+  const chars='\u2588\u2593\u2592\u2591\u2557\u2554\u255A\u255D\u2551\u2550\u2563\u2560\u256C\u253C\u2524\u251C\u2534\u252C\u2500\u2502@#$%&';
+  let out='';
+  for(let i=0;i<str.length;i++) { out += Math.random()<0.45 ? chars[Math.floor(Math.random()*chars.length)] : str[i]; }
+  return out;
+}
+
+// ─── COMMANDS ───
+const COMMANDS = {
+  help:      { desc:'Muestra los comandos disponibles', fn:cmdHelp },
+  clear:     { desc:'Limpia la terminal', fn:cmdClear },
+  status:    { desc:'Diagnóstico del sistema', fn:cmdStatus },
+  time:      { desc:'Hora actual del servidor', fn:cmdTime },
+  prime:     { desc:'Números primos del 1 al 100', fn:cmdPrime },
+  whoami:    { desc:'Información del operador', fn:cmdWhoami },
+  ping:      { desc:'Test de conexión a la red', fn:cmdPing },
+  intercept: { desc:'Activar antena de interceptación', fn:cmdIntercept },
+  version:   { desc:'Información de versión', fn:cmdVersion },
+  config:    { desc:'Descargar paquete de configuración', fn:cmdConfig },
+};
+
+async function cmdHelp() {
+  addLine('');
+  const col = currentMode === 'emergency' ? 'warn' : 'info';
+  addLine('  COMANDOS DISPONIBLES', col);
+  addLine('  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500', 'dim');
+  for(const[name,cmd] of Object.entries(COMMANDS)) addLine(`  ${name.padEnd(14)} ${cmd.desc}`);
+  addLine('  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500', 'dim');
+  addLine('');
+}
+
+async function cmdClear() { T.innerHTML=''; await renderHeader(); }
+
+async function cmdStatus() {
+  addLine('');addLine('  DIAGNÓSTICO DEL SISTEMA','info');
+  addLine('  ─────────────────────────────────────','dim');
+  const items=[['CPU','Intel Xeon E5-2699 v4','OK'],['RAM','64 GB DDR4 ECC','OK'],['DISCO','2TB NVMe RAID-1','OK'],['RED','Eth0 1Gbps','OK'],['ANTENA','HF/VHF/UHF Array','STANDBY'],['CIFRADO','AES-256-GCM','ACTIVO'],['FIREWALL','iptables v1.8.9','ACTIVO']];
+  for(const[mod,detail,st] of items){
+    const stCls=st==='OK'?'success':st==='ACTIVO'?'success':'warn';
+    addLineHTML(`  ${mod.padEnd(12)} ${detail.padEnd(24)} <span class="${stCls}">[${st}]</span>`);
+    await sleep(100);
+  }
+  addLine('  ─────────────────────────────────────','dim');addLine('');
+}
+
+async function cmdTime() {
+  addLine('');addLine(`  ${new Date().toISOString().replace('T',' ').substring(0,23)} UTC`,'info');addLine('');
+}
+
+async function cmdPrime() {
+  const primes=[];for(let n=2;n<=100;n++){let p=true;for(let d=2;d<=Math.sqrt(n);d++){if(n%d===0){p=false;break;}}if(p)primes.push(n);}
+  addLine('');addLine('  NÚMEROS PRIMOS [1-100]','info');
+  addLine('  '+primes.join(', '));addLine(`  Total: ${primes.length}`,'dim');addLine('');
+}
+
+async function cmdWhoami() {
+  addLine('');
+  if (currentMode === 'emergency') {
+    addLine('  OPERADOR: em_override','warn');
+    addLine('  NIVEL DE ACCESO: 7 / 7','warn');
+    addLine('  TIPO: EMERGENCIA — OVERRIDE','error');
+  } else {
+    addLine('  OPERADOR: [CLASIFICADO]','warn');
+    addLine('  NIVEL DE ACCESO: 2 / 7');
+  }
+  addLine('  SESIÓN: '+randHex(16),'dim');
+  addLine('  NODO: ESTACIÓN-'+Math.floor(Math.random()*900+100),'dim');addLine('');
+}
+
+async function cmdPing() {
+  addLine('');addLine('  Enviando paquetes ICMP a 10.0.77.1 ...','dim');
+  for(let i=0;i<4;i++){await sleep(300+Math.random()*500);addLine(`  64 bytes desde 10.0.77.1: icmp_seq=${i+1} ttl=64 tiempo=${(Math.random()*40+5).toFixed(1)}ms`);}
+  addLine('  4 paquetes transmitidos, 4 recibidos, 0% pérdida','success');addLine('');
+}
+
+async function cmdVersion() {
+  addLine('');addLine('  BUILD: ████████-████','warn');
+  addLine('  COMPILACIÓN: [DATOS CORRUPTOS]','error');
+  addLine('  KERNEL: 5.15.██-generic','dim');addLine('');
+}
+
+// ─── CONFIG COMMAND ───
+async function cmdConfig() {
+  inputLocked = true;
+  addLine('');
+  addLine('  [SISTEMA] Generando paquete de configuración...','info');
+  await sleep(400);
+
+  const steps = [['Recopilando specs del sistema',350],['Exportando registro de usuarios',400],['Compilando manual de comandos',500],['Cifrando paquete',600]];
+  for(const[step,delay] of steps) {
+    const line = addLine(`  ${step.padEnd(40)} [    ]`);
+    await sleep(delay);
+    line.textContent = `  ${step.padEnd(40)} [ OK ]`;
+    line.className = 'output-line success';
+  }
+
+  await sleep(300);
+  addLine('');
+  const now = new Date();
+  const dateStr = String(now.getDate()).padStart(2,'0') + '/' + String(now.getMonth()+1).padStart(2,'0') + '/' + now.getFullYear();
+  addLine(`  Archivo: Configuración-Sistema_primes.rar`,'info');
+  addLine(`  Cifrado: AES-256`,'dim');
+  addLine(`  Contraseña: [VINCULADA A PRIMES DEL SISTEMA]`,'dim');
+  addLine('');
+  addLine('  Descargando...','success');
+
+  // Download external .rar file (must be in same directory as index.html)
+  try {
+    const link=document.createElement('a');
+    link.href='Configuración-Sistema_primes.rar';
+    link.download='Configuración-Sistema_primes.rar';
+    link.click();
+    await sleep(400);
+    addLine('  Archivo guardado.','dim');
+  } catch(e) {
+    addLine('  [ERROR] No se pudo descargar el paquete.','error');
+  }
+  addLine('');
+  inputLocked = false;
+}
+
+// ─── INTERCEPT ───
+async function cmdIntercept() {
+  inputLocked = true;
+  addLine('');addLine('  [SISTEMA] Iniciando secuencia de interceptación','info');
+  await sleep(400);
+  const bootSteps=[['Alimentación antena',300],['Calibración HF',500],['Calibración VHF',400],['Calibración UHF',350],['Sincronización GPS',600],['Enlace satelital',450],['Buffer de captura',200],['Módulo DSP',350]];
+  for(const[step,delay] of bootSteps){
+    const line=addLine(`  ${step.padEnd(28)} [    ]`);await sleep(delay);
+    line.textContent=`  ${step.padEnd(28)} [ OK ]`;line.className='output-line success';
+  }
+  await sleep(300);addLine('');addLine('  ANTENA OPERATIVA — Escaneando espectro...','success');
+  addLine('  ─────────────────────────────────────────────────','dim');await sleep(500);
+  const packetCount=18+Math.floor(Math.random()*8);
+  for(let i=0;i<packetCount;i++){
+    const ts=randTimestamp(),freq=randFreq(),db=randDB(),src=randIP();
+    const proto=['TCP','UDP','ICMP','UNKNOWN'][Math.floor(Math.random()*4)];
+    addLine(`  ${ts}  ${freq.padStart(10)}Hz  ${db.padStart(7)}dB  ${src.padEnd(16)} ${proto.padEnd(8)} ${Math.floor(Math.random()*4096+64)}B`,'dim');
+    await sleep(80+Math.random()*120);
+  }
+  await sleep(400);addLine('');
+  addLine('  ██████████████████████████████████████████████████','warn');
+  addLine('  ▓▓ ANOMALÍA DETECTADA EN FRECUENCIA 0.00 Hz   ▓▓','warn');
+  addLine('  ██████████████████████████████████████████████████','warn');
+  await sleep(600);addLine('');
+  addLine('  Origen:            DESCONOCIDO','info');addLine('  Frecuencia:        0.00 Hz','info');
+  addLine('  Potencia:          '+(Math.random()*-3-0.1).toFixed(2)+' dB','info');
+  addLine('  Modulación:        NO IDENTIFICADA','info');
+  addLine('  Capas de cifrado:  [████████████████████]','info');
+  addLine('  Tamaño payload:    '+(Math.floor(Math.random()*500+2048))+' bytes','info');
+  await sleep(500);addLine('');
+  await typeText('  ¿CONTINUAR DECODIFICACIÓN? [y/n] _','warn',30);addLine('');
+  inputLocked=false;
+  const answer=await createPrompt();inputLocked=true;
+  if(!['y','yes','si','sí','s'].includes(answer.toLowerCase())){addLine('');addLine('  Interceptación cancelada.','dim');addLine('');inputLocked=false;return;}
+  addLine('');addLine('  [SISTEMA] Iniciando decodificación de señal...','info');await sleep(300);
+  for(let i=0;i<12;i++){addLine(`  0x${(i*256).toString(16).padStart(6,'0')}  ${randHex(48).match(/.{2}/g).join(' ')}`,'dim');await sleep(100);}
+  await sleep(200);addLine('  Decodificando capa 1/█ ...','');await sleep(600);
+  for(let i=0;i<6;i++){addLine(`  0x${((i+12)*256).toString(16).padStart(6,'0')}  ${randHex(48).match(/.{2}/g).join(' ')}`,'dim');await sleep(80);}
+  addLine('  Decodificando capa 2/█ ...','');await sleep(400);
+  await triggerGlitch();
+}
+
+async function triggerGlitch() {
+  const terminal=document.getElementById('terminal');
+  const colors=['#ff0000','#00ff41','#0000ff','#ff00ff','#ffff00','#00ffff','#ff3300','#ffffff'];
+  for(let burst=0;burst<6;burst++){flash.style.background=colors[Math.floor(Math.random()*colors.length)];flash.classList.add('active');await sleep(50+Math.random()*80);flash.classList.remove('active');await sleep(30+Math.random()*60);}
+  terminal.classList.add('screen-flicker');await sleep(800);terminal.classList.remove('screen-flicker');await sleep(200);
+  const allLines=terminal.querySelectorAll('.output-line, .header-line, .separator, .input-row');
+  const lineArray=Array.from(allLines);
+  for(let wave=0;wave<4;wave++){
+    flash.style.background=colors[Math.floor(Math.random()*colors.length)];flash.classList.add('active');await sleep(40);flash.classList.remove('active');
+    const s=Math.floor(wave*lineArray.length/4),e=Math.floor((wave+1)*lineArray.length/4);
+    for(let i=s;i<e&&i<lineArray.length;i++){
+      const el=lineArray[i];
+      if(el.querySelector('input')){const sp=el.querySelector('.prompt-char');if(sp)sp.textContent='█';const inp=el.querySelector('input');if(inp){inp.value=corruptString(inp.value||'████');inp.disabled=true;}}
+      else{const o=el.textContent;if(o.trim()){el.textContent=corruptString(o);el.classList.add('corrupted');}}
+    }
+    await sleep(300+Math.random()*200);
+  }
+  terminal.classList.add('screen-flicker');await sleep(600);terminal.classList.remove('screen-flicker');
+  flash.style.background='#ff0000';flash.classList.add('active');await sleep(100);flash.classList.remove('active');await sleep(800);
+  addLine('');addLine('');
+  addLine('  ██████████████████████████████████████████████████','error');
+  addLine('  ██                                              ██','error');
+  addLine('  ██     ERROR CRÍTICO — SISTEMA CORROMPIDO       ██','error');
+  addLine('  ██     La señal ha comprometido el sistema.      ██','error');
+  addLine('  ██                                              ██','error');
+  addLine('  ██     Se ha generado un volcado de memoria     ██','error');
+  addLine('  ██     con los últimos datos capturados.        ██','error');
+  addLine('  ██                                              ██','error');
+  addLine('  ██████████████████████████████████████████████████','error');
+  await sleep(1000);addLine('');await typeText('  Ejecute para extraer el log:','warn',30);await sleep(300);addLine('');
+  addLine('  503_x_507.pdf --> download.pdf','info');addLine('');
+  systemCorrupted=true;inputLocked=false;awaitDownload();
+}
+
+async function awaitDownload() {
+  while(true){
+    const cmd=await createPrompt();const clean=cmd.toLowerCase().replace(/\s+/g,'');
+    if(clean==='503_x_507.pdf-->download.pdf'||clean==='503_x_507.pdf'){
+      addLine('');addLine('  Extrayendo volcado de memoria...','warn');await sleep(600);
+      const bar=addLine('  [                              ] 0%','dim');
+      for(let p=0;p<=100;p+=Math.floor(Math.random()*8+3)){const f=Math.floor(p/100*30);bar.textContent=`  [${'█'.repeat(f)}${' '.repeat(30-f)}] ${Math.min(p,100)}%`;await sleep(60+Math.random()*80);}
+      bar.textContent=`  [${'█'.repeat(30)}] 100%`;bar.className='output-line success';await sleep(300);
+      addLine('');addLine('  Descargando 503_x_507.pdf ...','success');
+      const bc=atob(PDF_503);const bn=new Uint8Array(bc.length);for(let i=0;i<bc.length;i++)bn[i]=bc.charCodeAt(i);
+      const blob=new Blob([bn],{type:'application/pdf'});const url=URL.createObjectURL(blob);
+      const link=document.createElement('a');link.href=url;link.download='503_x_507.pdf';link.click();URL.revokeObjectURL(url);
+      await sleep(500);addLine('  Archivo guardado.','dim');addLine('');
+      addLine('  [SISTEMA] Terminal comprometida. Reinicie para restaurar.','error');addLine('');
+      inputLocked=true;return;
+    } else {addLine('  [ERROR] Sistema corrompido. Comando no reconocido.','error');addLine('  Ejecute: 503_x_507.pdf --> download.pdf','warn');addLine('');}
+  }
+}
+
+// ─── SESSION CHANGE with ARROW MENU ───
+async function cmdChangeSession() {
+  inputLocked = true;
+  addLine('');
+  addLine('  [SISTEMA] Cargando perfiles de usuario...','info');
+  await sleep(500);
+  addLine('');
+  addLine('  SELECCIÓN DE SESIÓN','info');
+  addLine('  Use ↑↓ para navegar, ENTER para seleccionar','dim');
+  addLine('  ─────────────────────────────────────────────────────────','dim');
+  addLine('');
+
+  const users = [
+    { id: 'op_default',  name: 'OPERADOR',      desc: 'Nivel 2  │  Estándar  │  Monitoreo básico' },
+    { id: 'an_sigint',   name: 'ANALISTA',       desc: 'Nivel 4  │  Análisis  │  [CONTRASEÑA REQUERIDA]' },
+    { id: 'adm_root',    name: 'ADMINISTRADOR',  desc: 'Nivel 6  │  Privilegiado  │  [ACCESO PRESENCIAL]' },
+    { id: 'em_override', name: 'EMERGENCIA',     desc: 'Nivel 7  │  Override  │  [CLAVE DE INCIDENTE]' },
+  ];
+
+  let selected = 0;
+  const menuLines = [];
+
+  for (let i = 0; i < users.length; i++) {
+    const div = document.createElement('div');
+    div.className = 'menu-item' + (i === 0 ? ' selected' : '');
+    const arrow = i === 0 ? '  ▸ ' : '    ';
+    div.textContent = `${arrow}${users[i].name.padEnd(18)} ${users[i].desc}`;
+    T.appendChild(div);
+    menuLines.push(div);
+  }
+
+  addLine('');
+  addLine('  ─────────────────────────────────────────────────────────','dim');
+  T.scrollTop = T.scrollHeight;
+
+  const choice = await new Promise(resolve => {
+    function updateMenu() {
+      for (let i = 0; i < users.length; i++) {
+        const arrow = i === selected ? '  ▸ ' : '    ';
+        menuLines[i].textContent = `${arrow}${users[i].name.padEnd(18)} ${users[i].desc}`;
+        menuLines[i].className = 'menu-item' + (i === selected ? ' selected' : '');
+      }
+    }
+    function handler(e) {
+      if (e.key === 'ArrowUp') { e.preventDefault(); selected = (selected - 1 + users.length) % users.length; updateMenu(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); selected = (selected + 1) % users.length; updateMenu(); }
+      else if (e.key === 'Enter') { e.preventDefault(); document.removeEventListener('keydown', handler); resolve(users[selected]); }
+      else if (e.key === 'Escape') { e.preventDefault(); document.removeEventListener('keydown', handler); resolve(null); }
+    }
+    document.addEventListener('keydown', handler);
+  });
+
+  if (!choice) {
+    addLine('');addLine('  Cambio de sesión cancelado.','dim');addLine('');
+    inputLocked = false;
+    return;
+  }
+
+  addLine('');
+  addLine(`  Seleccionado: ${choice.name}`, 'info');
+
+  if (choice.id === 'op_default') {
+    if (currentMode === 'normal') {
+      addLine('  Ya se encuentra en la sesión de OPERADOR.','dim');addLine('');
+      inputLocked = false;
+      return;
+    }
+    // Switch back from emergency to normal
+    addLine('');addLine('  [SISTEMA] Cerrando modo de emergencia...','warn');
+    await sleep(500);
+    const terminal = document.getElementById('terminal');
+    terminal.classList.add('screen-flicker');
+    await sleep(400);
+    T.innerHTML = '';
+    terminal.classList.remove('screen-flicker');
+    currentMode = 'normal';
+    document.documentElement.style.setProperty('--primary', '#00ff41');
+    document.documentElement.style.setProperty('--primary-dim', '#00aa2a');
+    document.documentElement.style.setProperty('--primary-dark', '#004d12');
+    document.documentElement.style.setProperty('--scanline', 'rgba(0, 255, 65, 0.03)');
+    await renderHeader();
+    addLine('  Sesión restaurada a OPERADOR.','success');addLine('');
+    inputLocked = false;
+    return;
+  }
+
+  if (choice.id === 'an_sigint') {
+    addLine('');addLine('  [ACCESO DENEGADO] Contraseña de ANALISTA no disponible.','error');
+    addLine('  Solicite credenciales a su supervisor.','dim');addLine('');
+    inputLocked = false;
+    return;
+  }
+
+  if (choice.id === 'adm_root') {
+    addLine('');addLine('  [ACCESO DENEGADO] Requiere autenticación presencial con HSM.','error');
+    addLine('  Diríjase a la sala de servidores.','dim');addLine('');
+    inputLocked = false;
+    return;
+  }
+
+  // EMERGENCY MODE
+  if (choice.id === 'em_override') {
+    if (currentMode === 'emergency') {
+      addLine('  Ya se encuentra en la sesión de EMERGENCIA.','dim');addLine('');
+      inputLocked = false;
+      return;
+    }
+    addLine('');
+    await typeText('  Introduzca la clave de emergencia:','warn',30);
+    addLine('');
+    inputLocked = false;
+
+    let attempts = 0;
+    while (attempts < 3) {
+      const pwd = await createPasswordPrompt('█');
+      attempts++;
+      if (pwd === 'FRECUENCIA_CERO') {
+        await activateEmergencyMode();
+        return;
+      } else {
+        addLine(`  [FALLO] Clave incorrecta. Intento ${attempts}/3.`,'error');
+        if (attempts < 3) {
+          addLine('  Reintente:','warn');addLine('');
+        }
+      }
+    }
+    addLine('');addLine('  [BLOQUEO] Perfil EMERGENCIA bloqueado por 5 minutos.','error');addLine('');
+    inputLocked = false;
+  }
+}
+
+async function activateEmergencyMode() {
+  inputLocked = true;
+  addLine('');
+  addLine('  [AUTENTICACIÓN EXITOSA]','success');
+  await sleep(400);
+
+  // Beep sound
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 880;
+    osc.type = 'square';
+    gain.gain.value = 0.15;
+    osc.start();
+    await sleep(200);
+    osc.stop();
+    ctx.close();
+  } catch(e) {}
+
+  await sleep(200);
+  addLine('  [SISTEMA] Activando modo de emergencia...','warn');
+  await sleep(400);
+
+  // Download packages sequence
+  const packages = [
+    'sigint-forensic-7.2.1',
+    'crypto-deepdecode-3.4.0',
+    'signal-traceback-2.1.8',
+    'memory-quarantine-1.5.3',
+    'blackbox-reader-4.0.2',
+    'hsm-override-tools-1.0.0',
+    'emergency-protocols-2026.3',
+    'incident-logger-5.1.1',
+  ];
+
+  for (const pkg of packages) {
+    addLine(`  Cargando ${pkg}...`,'dim');
+    await sleep(150 + Math.random() * 200);
+  }
+
+  await sleep(300);
+  addLine('  Todos los módulos cargados.','success');
+  await sleep(400);
+
+  // Flicker transition
+  const terminal = document.getElementById('terminal');
+  terminal.classList.add('screen-flicker');
+  await sleep(500);
+
+  // Clear and rebuild in amber
+  T.innerHTML = '';
+  terminal.classList.remove('screen-flicker');
+
+  currentMode = 'emergency';
+
+  // Update CSS variables for amber
+  document.documentElement.style.setProperty('--primary', '#ffaa00');
+  document.documentElement.style.setProperty('--primary-dim', '#cc8800');
+  document.documentElement.style.setProperty('--primary-dark', '#4d3600');
+  document.documentElement.style.setProperty('--scanline', 'rgba(255, 170, 0, 0.03)');
+
+  // New header
+  const h1 = document.createElement('div');
+  h1.className = 'header-line';
+  h1.style.color = 'var(--amber)';
+  h1.textContent = '⚠  MODO DE EMERGENCIA — SESIÓN OVERRIDE ACTIVA  ⚠';
+  T.appendChild(h1);
+
+  const h2 = document.createElement('div');
+  h2.className = 'header-line';
+  h2.style.color = 'var(--amber-dim)';
+  h2.textContent = 'OPERADOR: em_override    NIVEL: 7/7    TODAS LAS ACCIONES QUEDAN REGISTRADAS';
+  T.appendChild(h2);
+
+  const h3 = document.createElement('div');
+  h3.className = 'header-line copyright';
+  h3.style.color = 'var(--amber-dark)';
+  h3.textContent = 'NODO: ' + randHex(8).toUpperCase() + '    SESIÓN: ' + randHex(12).toUpperCase() + '    INCIDENTE: INC-2026-0327-001';
+  T.appendChild(h3);
+
+  const sep = document.createElement('div');
+  sep.className = 'separator';
+  sep.style.color = 'var(--amber-dark)';
+  sep.textContent = '═'.repeat(72);
+  T.appendChild(sep);
+
+  const hint = document.createElement('div');
+  hint.className = 'output-line';
+  hint.style.color = 'var(--amber-dark)';
+  hint.textContent = '  Herramientas de emergencia disponibles. Escriba "help" para ver comandos.';
+  T.appendChild(hint);
+
+  addLine('');
+
+  inputLocked = false;
+  systemCorrupted = false; // Reset so terminal works again
+}
+
+// ─── EMERGENCY MODE STATE ───
+const ANOMALY_SPECTRUM_ID = 'SIG-0x00-ANM-021';
+const ANOMALY_ID_B64 = btoa(ANOMALY_SPECTRUM_ID); // U0lHLTB4MDAtQU5NLTAyMQ==
+let blackboxUsed = false;
+let signalQuarantined = false;
+let deepdecodeUsed = false;
+let corruptionTimer = null;
+
+// ─── SCAN COMMAND ───
+async function cmdScan(args) {
+  if (currentMode !== 'emergency') {
+    addLine('');addLine('  [ACCESO DENEGADO] Requiere nivel 4+ (ANALISTA o superior).','error');addLine('');return;
+  }
+  inputLocked = true;
+  const parts = args.trim().split(/\s+/);
+  if (parts.length < 2 || isNaN(parseFloat(parts[0])) || isNaN(parseFloat(parts[1]))) {
+    addLine('');addLine('  Uso: scan [frecuencia_inicio] [frecuencia_fin]','error');
+    addLine('  Ejemplo: scan -200 0','dim');addLine('');inputLocked=false;return;
+  }
+
+  const fStart = parseFloat(parts[0]);
+  const fEnd = parseFloat(parts[1]);
+
+  if (fStart > fEnd) {
+    addLine('');addLine('  [ERROR] Frecuencia inicio debe ser menor que frecuencia fin.','error');addLine('');inputLocked=false;return;
+  }
+
+  // Both negative
+  if (fStart < 0 && fEnd < 0) {
+    addLine('');addLine('  [ERROR] Rango de frecuencias inválido. No se detectan señales en','error');
+    addLine('  frecuencias negativas puras. Ajuste el rango de escaneo.','error');addLine('');inputLocked=false;return;
+  }
+
+  addLine('');
+  addLine(`  [SCAN] Escaneando espectro: ${fStart} Hz — ${fEnd} Hz`,'warn');
+  addLine('  ─────────────────────────────────────────────────────────','dim');
+  await sleep(500);
+
+  const includesZero = fStart <= 0 && fEnd >= 0;
+  const onlyNegToZero = fStart < 0 && fEnd <= 0;
+
+  // Generate random signals
+  let signalCount;
+  if (onlyNegToZero || (fStart < 0 && fEnd <= 5)) {
+    signalCount = Math.floor(Math.random() * 2) + 1;
+  } else if (includesZero) {
+    signalCount = Math.floor(Math.random() * 5) + 4;
+  } else {
+    signalCount = Math.floor(Math.random() * 6) + 5;
+  }
+
+  const signals = [];
+
+  // If range includes zero, add the anomalous signal
+  if (includesZero || onlyNegToZero) {
+    signals.push({
+      freq: '0.00',
+      db: '???',
+      src: '???:???:???:???',
+      proto: '???????',
+      size: '????',
+      cls: '??????????????',
+      id: '????????????????',
+      anomaly: true
+    });
+  }
+
+  // Add random signals (only for positive frequencies)
+  if (!onlyNegToZero) {
+    for (let i = 0; i < signalCount; i++) {
+      const freq = (Math.random() * (fEnd - Math.max(fStart, 0.01)) + Math.max(fStart, 0.01)).toFixed(2);
+      signals.push({
+        freq: freq,
+        db: randDB(),
+        src: randIP(),
+        proto: ['TCP','UDP','AX.25','DMR','P25'][Math.floor(Math.random()*5)],
+        size: String(Math.floor(Math.random()*4096+64)),
+        cls: ['CIVIL','COMERCIAL','MILITAR','GUBERNAMENTAL'][Math.floor(Math.random()*4)],
+        id: 'SIG-0x' + randHex(4).toUpperCase(),
+        anomaly: false
+      });
+    }
+  }
+
+  // Sort by freq
+  signals.sort((a,b) => parseFloat(a.freq) - parseFloat(b.freq));
+
+  // Display header
+  addLine(`  ${'ID'.padEnd(20)} ${'FREQ (Hz)'.padStart(12)} ${'dB'.padStart(8)} ${'ORIGEN'.padEnd(18)} ${'PROTO'.padEnd(10)} ${'CLASIF.'.padEnd(16)}`,'dim');
+  addLine('  ' + '─'.repeat(88),'dim');
+
+  for (const sig of signals) {
+    await sleep(150 + Math.random() * 200);
+    if (sig.anomaly) {
+      addLine(`  ${'????????????????'.padEnd(20)} ${'0.00'.padStart(12)} ${'???'.padStart(8)} ${'???:???:???:???'.padEnd(18)} ${'???????'.padEnd(10)} ${'??????????????'.padEnd(16)}`,'error');
+    } else {
+      addLine(`  ${sig.id.padEnd(20)} ${sig.freq.padStart(12)} ${sig.db.padStart(8)} ${sig.src.padEnd(18)} ${sig.proto.padEnd(10)} ${sig.cls.padEnd(16)}`);
+    }
+  }
+
+  addLine('');
+  addLine('  ' + '─'.repeat(88),'dim');
+  addLine(`  ${signals.length} señales detectadas.`,'dim');
+  if (signals.some(s => s.anomaly)) {
+    addLine('  ⚠ Señal anómala detectada en 0.00 Hz — ID no identificable.','error');
+  }
+  addLine('');
+  inputLocked = false;
+}
+
+// ─── BLACKBOX COMMAND ───
+async function cmdBlackbox(args) {
+  if (currentMode !== 'emergency') {
+    addLine('');addLine('  [ACCESO DENEGADO] Requiere nivel 7 (EMERGENCIA).','error');addLine('');return;
+  }
+  const sub = args.trim().toLowerCase();
+  if (!['review','export','status'].includes(sub)) {
+    addLine('');addLine('  Uso: blackbox [review | export | status]','error');addLine('');return;
+  }
+  inputLocked = true;
+
+  if (sub === 'status') {
+    addLine('');
+    addLine('  BLACKBOX — ESTADO','warn');
+    addLine('  ─────────────────────────────────────','dim');
+    addLine('  Integridad del registro:    [OK] Verificado','success');
+    addLine('  Entradas totales:           2,847','');
+    addLine('  Firma criptográfica:        HMAC-SHA384 VÁLIDA','success');
+    addLine('  Último evento:              ' + new Date().toISOString().replace('T',' ').substring(0,19) + ' UTC','');
+    addLine('  ─────────────────────────────────────','dim');
+    addLine('');inputLocked=false;return;
+  }
+
+  if (sub === 'export') {
+    addLine('');addLine('  [SISTEMA] Generando volcado cifrado del registro...','warn');
+    await sleep(800);
+    addLine('  [ERROR] Volcado no disponible durante un incidente activo.','error');
+    addLine('  Use "blackbox review" para visualizar las entradas.','dim');
+    addLine('');inputLocked=false;return;
+  }
+
+  // REVIEW — The key one with hidden intruder actions
+  addLine('');
+  addLine('  BLACKBOX — ÚLTIMAS ENTRADAS DEL REGISTRO','warn');
+  addLine('  ═════════════════════════════════════════════════════════════════════','dim');
+  await sleep(300);
+
+  // Mix user actions with intruder actions
+  // Intruder actions are partially encrypted
+  const userActions = [
+    { ts: '14:22:07.441', action: 'SESSION_START    op_default    auth=auto    node=ESTACIÓN-' + Math.floor(Math.random()*900+100) },
+    { ts: '14:22:09.102', action: 'CMD_EXEC         help' },
+    { ts: '14:22:14.887', action: 'CMD_EXEC         status    result=OK    modules=7/7' },
+    { ts: '14:22:31.220', action: 'CMD_EXEC         intercept    antenna=HF/VHF/UHF' },
+    { ts: '14:22:35.016', action: 'SIGNAL_CAPTURE   signals=20    anomalies=1' },
+    { ts: '14:22:41.007', action: 'ANOMALY_DETECT   freq=0.00Hz    origin=UNKNOWN    id=???' },
+    { ts: '14:22:42.339', action: 'DECODE_ATTEMPT   signal=021    layer=1/█    status=PARTIAL' },
+    { ts: '14:22:43.871', action: 'DECODE_ATTEMPT   signal=021    layer=2/█    status=FAILED' },
+    { ts: '14:22:44.002', action: 'SYSTEM_CORRUPT   integrity=COMPROMISED    dump=503_x_507.pdf' },
+    { ts: '14:26:51.443', action: 'SESSION_CHANGE   em_override    auth=CLAVE_INCIDENTE    result=OK' },
+    { ts: '14:26:58.110', action: 'MODE_CHANGE      emergency    modules_loaded=8' },
+  ];
+
+  // Intruder actions — partially corrupted, with the hidden ID
+  function partialCorrupt(text, intensity) {
+    const chars = '█▓▒░╬═║';
+    let out = '';
+    for (let i = 0; i < text.length; i++) {
+      out += Math.random() < intensity ? chars[Math.floor(Math.random()*chars.length)] : text[i];
+    }
+    return out;
+  }
+
+  const intruderActions = [
+    { ts: '14:22:41.008', action: partialCorrupt('EXT_ACCESS       src=???    proto=UNKNOWN    ', 0.3) + partialCorrupt('bypass=FIREWALL', 0.5), intensity: 0.2 },
+    { ts: '14:22:41.009', action: partialCorrupt('PRIV_ESCALATION  level=0-->7    method=', 0.3) + partialCorrupt('SIGNAL_INJECT', 0.6), intensity: 0.3 },
+    { ts: '14:22:41.050', action: partialCorrupt('MEM_WRITE        addr=0x00FF_A000    size=2731B    ', 0.35) + partialCorrupt('payload=ENCRYPTED', 0.5), intensity: 0.25 },
+    { ts: '14:22:41.051', action: partialCorrupt('PROC_SPAWN       pid=', 0.2) + partialCorrupt('6671    name=sigint_override    user=ROOT', 0.4), intensity: 0.3 },
+    { ts: '14:22:41.102', action: partialCorrupt('SPECTRA_BIND     target=' + ANOMALY_ID_B64 + '    ', 0.05) + partialCorrupt('lock=PERMANENT', 0.5), intensity: 0.15 },
+    { ts: '14:22:41.200', action: partialCorrupt('SYS_CONTROL      ', 0.3) + partialCorrupt('attempt=TAKEOVER    modules=DSP,HSM,NET    ', 0.45) + partialCorrupt('status=PARTIAL', 0.6), intensity: 0.35 },
+    { ts: '14:22:41.340', action: partialCorrupt('DATA_EXFIL       ', 0.3) + partialCorrupt('target=SIGINT_LOGS    method=TUNNEL    dest=', 0.45) + partialCorrupt('UNKNOWN', 0.7), intensity: 0.4 },
+    { ts: '14:22:43.900', action: partialCorrupt('ANTI_FORENSIC    ', 0.35) + partialCorrupt('wipe=LOGS,TRACES    corrupt=SYSTEM    ', 0.5) + partialCorrupt('status=INTERRUPTED', 0.4), intensity: 0.35 },
+  ];
+
+  // Merge and sort by timestamp
+  const allActions = [
+    ...userActions.map(a => ({...a, type: 'user'})),
+    ...intruderActions.map(a => ({...a, type: 'intruder'}))
+  ];
+  allActions.sort((a, b) => a.ts.localeCompare(b.ts));
+
+  for (const entry of allActions) {
+    await sleep(60 + Math.random() * 80);
+    if (entry.type === 'user') {
+      addLine(`  ${entry.ts}  ${entry.action}`);
+    } else {
+      // Intruder actions — same green color but partially corrupted
+      addLine(`  ${entry.ts}  ${entry.action}`);
+    }
+  }
+
+  addLine('  ═════════════════════════════════════════════════════════════════════','dim');
+  addLine(`  ${allActions.length} entradas mostradas.`,'dim');
+
+  if (!blackboxUsed) {
+    blackboxUsed = true;
+    await sleep(300);
+    addLine('');
+    addLine('  ⚠ Se han detectado entradas no autorizadas en el registro.','error');
+    addLine('  Algunas acciones no corresponden a ninguna sesión conocida.','error');
+  }
+
+  addLine('');
+  inputLocked = false;
+}
+
+// ─── DECODE COMMAND ───
+async function cmdDecode(args) {
+  if (currentMode !== 'emergency') {
+    addLine('');addLine('  [ACCESO DENEGADO] Requiere nivel 4+ (ANALISTA o superior).','error');addLine('');return;
+  }
+  const parts = args.trim().split(/\s+/);
+  if (parts.length < 2) {
+    addLine('');addLine('  Uso: decode [tipo] [datos]','error');
+    addLine('  Tipos: hex, base64, caesar, vigenere, morse, binary','dim');addLine('');return;
+  }
+
+  const tipo = parts[0].toLowerCase();
+  const data = parts.slice(1).join(' ');
+  inputLocked = true;
+  addLine('');
+  addLine(`  [DECODE] Tipo: ${tipo.toUpperCase()}    Datos: ${data}`,'warn');
+  await sleep(300);
+
+  try {
+    let result = '';
+    if (tipo === 'base64') {
+      result = atob(data);
+    } else if (tipo === 'hex') {
+      result = data.match(/.{2}/g).map(h => String.fromCharCode(parseInt(h, 16))).join('');
+    } else if (tipo === 'caesar') {
+      const shift = parseInt(data.charAt(0));
+      const text = data.substring(2);
+      result = text.split('').map(c => {
+        if (/[a-zA-Z]/.test(c)) {
+          const base = c === c.toUpperCase() ? 65 : 97;
+          return String.fromCharCode((c.charCodeAt(0) - base - shift + 26) % 26 + base);
+        }
+        return c;
+      }).join('');
+    } else if (tipo === 'binary') {
+      result = data.split(' ').map(b => String.fromCharCode(parseInt(b, 2))).join('');
+    } else if (tipo === 'morse') {
+      const morseMap = {'.-':'A','-...':'B','-.-.':'C','-..':'D','.':'E','..-.':'F','--.':'G','....':'H','..':'I','.---':'J','-.-':'K','.-..':'L','--':'M','-.':'N','---':'O','.--.':'P','--.-':'Q','.-.':'R','...':'S','-':'T','..-':'U','...-':'V','.--':'W','-..-':'X','-.--':'Y','--..':'Z'};
+      result = data.split(' / ').map(word => word.split(' ').map(c => morseMap[c] || '?').join('')).join(' ');
+    } else {
+      addLine(`  [ERROR] Tipo desconocido: ${tipo}. Use: hex, base64, caesar, morse, binary.`,'error');
+      addLine('');inputLocked=false;return;
+    }
+    addLine(`  Resultado: ${result}`,'info');
+  } catch(e) {
+    addLine('  [ERROR] No se pudo decodificar. Verifique el formato de los datos.','error');
+  }
+  addLine('');
+  inputLocked = false;
+}
+
+// ─── SPECTRA COMMAND ───
+async function cmdSpectra(args) {
+  if (currentMode !== 'emergency') {
+    addLine('');addLine('  [ACCESO DENEGADO] Requiere nivel 4+ (ANALISTA o superior).','error');addLine('');return;
+  }
+  const id = args.trim();
+  if (!id) {
+    addLine('');addLine('  Uso: spectra [signal_id]','error');addLine('');return;
+  }
+  inputLocked = true;
+  addLine('');
+
+  if (id === ANOMALY_SPECTRUM_ID) {
+    addLine('  ANÁLISIS ESPECTRAL — ' + ANOMALY_SPECTRUM_ID,'warn');
+    addLine('  ═══════════════════════════════════════════════════','dim');
+    await sleep(300);
+    addLine('  ID:                ' + ANOMALY_SPECTRUM_ID,'info');
+    addLine('  Frecuencia:        0.00 Hz','info');
+    addLine('  Modulación:        NO IDENTIFICADA — Patrón no lineal','info');
+    addLine('  Potencia:          -0.73 dB (anormalmente alta para 0Hz)','info');
+    addLine('  Ancho de banda:    ∞ (no acotada)','info');
+    addLine('  FFT:               Distribución uniforme — sin picos definidos','info');
+    addLine('  Fase:              Rotación constante 2π — coherencia perfecta','info');
+    addLine('  Origen:            NO TRIANGULABLE','error');
+    addLine('  Capas cifrado:     7+ (estimación HSM)','error');
+    addLine('  Payload:           2731 bytes — Estructura desconocida','info');
+    addLine('  Checksum:          VÁLIDO (SHA-384: ' + randHex(16) + '...)','info');
+    addLine('  Waterfall:         Firma anómala — Actividad persistente','error');
+    addLine('  ═══════════════════════════════════════════════════','dim');
+    addLine('');
+    addLine('  ⚠ Esta señal requiere decodificación profunda.','error');
+    addLine('  Use: deepdecode ' + ANOMALY_SPECTRUM_ID,'warn');
+    addLine('');
+  } else {
+    // Random signal spectra
+    addLine('  ANÁLISIS ESPECTRAL — ' + id,'warn');
+    addLine('  ═══════════════════════════════════════════════════','dim');
+    await sleep(200);
+    const freq = (Math.random() * 29000 + 100).toFixed(2);
+    addLine('  ID:                ' + id);
+    addLine('  Frecuencia:        ' + freq + ' Hz');
+    addLine('  Modulación:        ' + ['FM','AM','PSK','QAM-16','OFDM'][Math.floor(Math.random()*5)]);
+    addLine('  Potencia:          ' + randDB() + ' dB');
+    addLine('  Clasificación:     ' + ['CIVIL','COMERCIAL','MILITAR'][Math.floor(Math.random()*3)]);
+    addLine('  Estado:            NORMAL — Sin anomalías');
+    addLine('  ═══════════════════════════════════════════════════','dim');
+    addLine('');
+  }
+  inputLocked = false;
+}
+
+// ─── DEEPDECODE COMMAND ───
+async function cmdDeepdecode(args) {
+  if (currentMode !== 'emergency') {
+    addLine('');addLine('  [ACCESO DENEGADO] Requiere nivel 7 (EMERGENCIA).','error');addLine('');return;
+  }
+  const id = args.trim();
+  if (!id) {
+    addLine('');addLine('  Uso: deepdecode [signal_id]','error');addLine('');return;
+  }
+  if (id !== ANOMALY_SPECTRUM_ID) {
+    addLine('');addLine(`  [DEEPDECODE] Analizando ${id}...`,'warn');await sleep(600);
+    addLine('  Señal estándar. Use "decode" para decodificación básica.','dim');addLine('');return;
+  }
+
+  inputLocked = true;
+  addLine('');
+  addLine('  [DEEPDECODE] Iniciando decodificación profunda de ' + ANOMALY_SPECTRUM_ID,'warn');
+  addLine('  Este proceso utiliza el HSM y requiere verificación.','dim');
+  await sleep(400);
+
+  // Ask for Python version
+  addLine('');
+  addLine('  Verificación de entorno requerida.','info');
+  addLine('  Introduzca la versión de Python del sistema:','warn');
+  addLine('');
+  inputLocked = false;
+  const pyVer = await createPrompt();
+  inputLocked = true;
+
+  if (pyVer.trim() !== '3.11.2') {
+    addLine('  [ERROR] Versión incorrecta. Consulte las especificaciones técnicas.','error');
+    addLine('');inputLocked = false;return;
+  }
+  addLine('  Python 3.11.2    [ OK ]','success');
+  await sleep(300);
+
+  addLine('  Introduzca la versión de OpenSSL del sistema:','warn');
+  addLine('');
+  inputLocked = false;
+  const sslVer = await createPrompt();
+  inputLocked = true;
+
+  if (sslVer.trim() !== '3.0.11') {
+    addLine('  [ERROR] Versión incorrecta. Consulte las especificaciones técnicas.','error');
+    addLine('');inputLocked = false;return;
+  }
+  addLine('  OpenSSL 3.0.11   [ OK ]','success');
+  await sleep(400);
+
+  addLine('');
+  addLine('  Entorno verificado. Iniciando HSM...','info');
+  await sleep(300);
+
+  // Deep decode sequence — packet extraction
+  const steps = [['HSM handshake',400],['Carga de claves maestras',500],['Asignación de recursos DSP',350],['Buffer de decodificación',250]];
+  for (const [step,delay] of steps) {
+    const line = addLine(`  ${step.padEnd(36)} [    ]`);
+    await sleep(delay);
+    line.textContent = `  ${step.padEnd(36)} [ OK ]`;
+    line.className = 'output-line success';
+  }
+
+  await sleep(300);
+  addLine('');
+  addLine('  Extrayendo capas de cifrado...','warn');
+  addLine('  ─────────────────────────────────────────────────','dim');
+
+  // Show packet extraction
+  for (let layer = 1; layer <= 7; layer++) {
+    addLine(`  Capa ${layer}/7 ...`,'');
+    for (let i = 0; i < 4; i++) {
+      const offset = '0x' + ((layer * 4 + i) * 256).toString(16).padStart(6,'0');
+      addLine(`  ${offset}  ${randHex(48).match(/.{2}/g).join(' ')}`,'dim');
+      await sleep(50 + Math.random() * 60);
+    }
+    if (layer < 5) {
+      await sleep(200);
+      addLine(`  Capa ${layer} decodificada.`,'success');
+    } else if (layer === 5) {
+      await sleep(300);
+      addLine(`  Capa ${layer} decodificada. Detectando resistencia...`,'warn');
+    } else if (layer === 6) {
+      await sleep(400);
+      addLine(`  Capa ${layer}... Anomalía en la estructura del payload.`,'error');
+    }
+    if (layer === 7) {
+      await sleep(200);
+      addLine('  Capa 7... Payload activo. La señal está respondiendo.','error');
+      break;
+    }
+  }
+
+  await sleep(500);
+  addLine('');
+  addLine('  ██ ALERTA: EL PAYLOAD CONTIENE CÓDIGO EJECUTABLE ██','error');
+  addLine('  ██ LA SEÑAL ESTÁ INTENTANDO ACCEDER AL SISTEMA   ██','error');
+  await sleep(300);
+
+  // Glitch + firewall
+  const terminal = document.getElementById('terminal');
+  const colors = ['#ff0000','#ffaa00','#ff3300','#ffffff'];
+
+  // Flicker
+  for (let i = 0; i < 4; i++) {
+    flash.style.background = colors[Math.floor(Math.random()*colors.length)];
+    flash.classList.add('active');await sleep(40+Math.random()*60);
+    flash.classList.remove('active');await sleep(30);
+  }
+
+  terminal.classList.add('screen-flicker');
+  await sleep(600);
+
+  // Firewall kicks in
+  addLine('');
+  addLine('  ┌──────────────────────────────────────────────────┐','success');
+  addLine('  │  FIREWALL ACTIVADO — Conexión bloqueada           │','success');
+  addLine('  │  iptables: DROP all -- src=UNKNOWN dst=LOCAL      │','success');
+  addLine('  │  Intrusión contenida. Sistema estabilizado.       │','success');
+  addLine('  └──────────────────────────────────────────────────┘','success');
+
+  terminal.classList.remove('screen-flicker');
+  await sleep(1000);
+
+  addLine('');
+  addLine('  La señal sigue activa en memoria. Debe ser aislada.','error');
+  addLine('');
+  addLine('  ⚠ EJECUTE: quarantine ' + ANOMALY_SPECTRUM_ID,'error');
+  addLine('  Tiene 30 segundos antes de que el sistema se corrompa.','error');
+  addLine('');
+
+  deepdecodeUsed = true;
+
+  // Start corruption timer
+  startCorruptionCountdown();
+  inputLocked = false;
+}
+
+// ─── CORRUPTION COUNTDOWN ───
+function startCorruptionCountdown() {
+  let elapsed = 0;
+  const interval = 2000;
+  let corruptedSet = new Set();
+
+  corruptionTimer = setInterval(() => {
+    elapsed += 2;
+    if (signalQuarantined) {
+      clearInterval(corruptionTimer);
+      corruptionTimer = null;
+      return;
+    }
+
+    // Get all lines that haven't been fully corrupted yet
+    const allEls = T.querySelectorAll('.output-line, .header-line, .separator, .menu-item');
+    const candidates = Array.from(allEls).filter(el => {
+      return el.textContent.trim().length > 0 && !corruptedSet.has(el);
+    });
+
+    // Corrupt 1-3 random lines per tick, increasing with time
+    const corruptCount = Math.min(Math.floor(elapsed / 6) + 1, 4);
+    const chars = '█▓▒░╬═║╗╔╚╝┼┤├┴┬@#$%&?';
+    for (let c = 0; c < corruptCount && candidates.length > 0; c++) {
+      const idx = Math.floor(Math.random() * candidates.length);
+      const target = candidates[idx];
+      candidates.splice(idx, 1);
+
+      let text = target.textContent;
+      let newText = '';
+      const intensity = 0.2 + (elapsed / 30) * 0.5;
+      for (let i = 0; i < text.length; i++) {
+        newText += Math.random() < intensity ? chars[Math.floor(Math.random()*chars.length)] : text[i];
+      }
+      target.textContent = newText;
+      target.style.color = '#cc2222';
+      target.style.opacity = String(0.7 - (elapsed / 30) * 0.3);
+      corruptedSet.add(target);
+    }
+
+    // After 30 seconds — full system corruption
+    if (elapsed >= 30 && !signalQuarantined) {
+      clearInterval(corruptionTimer);
+      corruptionTimer = null;
+      systemCorrupted = true;
+
+      // Disable any active input
+      const activeInput = T.querySelector('#command-input:not([disabled])');
+      if (activeInput) {
+        activeInput.disabled = true;
+        activeInput.value = '';
+      }
+      inputLocked = true;
+
+      // Corrupt ALL remaining lines
+      const remaining = T.querySelectorAll('.output-line, .header-line, .separator');
+      remaining.forEach(el => {
+        if (!corruptedSet.has(el) && el.textContent.trim()) {
+          let t = el.textContent;
+          let n = '';
+          for (let i = 0; i < t.length; i++) n += Math.random() < 0.7 ? chars[Math.floor(Math.random()*chars.length)] : t[i];
+          el.textContent = n;
+          el.style.color = '#cc2222';
+          el.style.opacity = '0.3';
+        }
+      });
+
+      // Flash red
+      flash.style.background = '#ff0000';
+      flash.classList.add('active');
+      setTimeout(() => flash.classList.remove('active'), 150);
+
+      setTimeout(() => {
+        addLine('');
+        addLine('  ██████████████████████████████████████████████████','error');
+        addLine('  ██                                              ██','error');
+        addLine('  ██  SISTEMA COMPLETAMENTE CORROMPIDO.           ██','error');
+        addLine('  ██  La señal ha tomado el control.               ██','error');
+        addLine('  ██  Reinicie la terminal para restaurar.         ██','error');
+        addLine('  ██                                              ██','error');
+        addLine('  ██████████████████████████████████████████████████','error');
+      }, 300);
+    }
+  }, interval);
+}
+
+// ─── QUARANTINE COMMAND ───
+async function cmdQuarantine(args) {
+  if (currentMode !== 'emergency') {
+    addLine('');addLine('  [ACCESO DENEGADO] Requiere nivel 7 (EMERGENCIA).','error');addLine('');return;
+  }
+  const id = args.trim();
+  if (!id) {
+    addLine('');addLine('  Uso: quarantine [signal_id | process_id]','error');addLine('');return;
+  }
+
+  inputLocked = true;
+
+  if (id === ANOMALY_SPECTRUM_ID && deepdecodeUsed) {
+    // Stop corruption
+    signalQuarantined = true;
+    if (corruptionTimer) { clearInterval(corruptionTimer); corruptionTimer = null; }
+
+    addLine('');
+    addLine('  [QUARANTINE] Aislando señal ' + id + '...','warn');
+    await sleep(400);
+    const qSteps = [['Capturando proceso en memoria',400],['Aislando en sandbox',500],['Cortando enlaces de red',350],['Congelando payload',300],['Verificando aislamiento',450]];
+    for (const [step,delay] of qSteps) {
+      const line = addLine(`  ${step.padEnd(40)} [    ]`);
+      await sleep(delay);
+      line.textContent = `  ${step.padEnd(40)} [ OK ]`;
+      line.className = 'output-line success';
+    }
+    await sleep(300);
+    addLine('');
+    addLine('  ┌──────────────────────────────────────────────────┐','success');
+    addLine('  │  SEÑAL AISLADA EXITOSAMENTE                      │','success');
+    addLine('  │  La señal ha sido contenida en sandbox seguro.    │','success');
+    addLine('  │  El sistema ha sido estabilizado.                 │','success');
+    addLine('  └──────────────────────────────────────────────────┘','success');
+    addLine('');
+    addLine('  Para rastrear el origen, use: traceback ' + ANOMALY_SPECTRUM_ID,'warn');
+    addLine('');
+  } else if (id === ANOMALY_SPECTRUM_ID) {
+    addLine('');addLine('  [ERROR] Debe ejecutar deepdecode primero para activar la señal.','error');addLine('');
+  } else {
+    addLine('');
+    addLine(`  [QUARANTINE] ${id} aislado en sandbox.`,'success');
+    addLine('');
+  }
+  inputLocked = false;
+}
+
+// ─── TRACEBACK COMMAND ───
+async function cmdTraceback(args) {
+  if (currentMode !== 'emergency') {
+    addLine('');addLine('  [ACCESO DENEGADO] Requiere nivel 7 (EMERGENCIA).','error');addLine('');return;
+  }
+  const id = args.trim();
+  if (!id) {
+    addLine('');addLine('  Uso: traceback [signal_id]','error');addLine('');return;
+  }
+
+  inputLocked = true;
+  addLine('');
+  addLine('  [TRACEBACK] Rastreando origen de ' + id + '...','warn');
+  await sleep(400);
+
+  if (id === ANOMALY_SPECTRUM_ID) {
+    if (!signalQuarantined) {
+      addLine('  [ERROR] La señal debe estar en cuarentena para rastrearla de forma segura.','error');
+      addLine('  Use: quarantine ' + ANOMALY_SPECTRUM_ID,'warn');addLine('');inputLocked=false;return;
+    }
+
+    addLine('  Analizando metadatos de enrutamiento...','dim');
+    await sleep(500);
+    addLine('  Reconstruyendo ruta de nodos intermedios...','dim');
+    await sleep(600);
+
+    addLine('');
+    addLine('  RUTA DE TRACEBACK','warn');
+    addLine('  ═══════════════════════════════════════════════════════','dim');
+
+    const hops = [
+      { node: 'LOCAL (ESTACIÓN)', ip: '10.0.77.1', latency: '0.1ms', status: 'OK' },
+      { node: 'GATEWAY INTERNO', ip: '10.0.77.254', latency: '1.2ms', status: 'OK' },
+      { node: 'NODO RELAY-7A', ip: '172.31.255.1', latency: '14.3ms', status: 'OK' },
+      { node: 'PROXY CIFRADO', ip: '198.51.100.47', latency: '47.8ms', status: 'CIFRADO' },
+      { node: '???', ip: '203.0.113.██', latency: '89.2ms', status: 'OFUSCADO' },
+      { node: '???', ip: '███.███.█.███', latency: '???', status: 'OFUSCADO' },
+      { node: 'ORIGEN ESTIMADO', ip: '???', latency: '???', status: 'NO RESUELTO' },
+    ];
+
+    for (let i = 0; i < hops.length; i++) {
+      await sleep(300 + Math.random() * 200);
+      const h = hops[i];
+      const stCls = h.status === 'OK' ? 'success' : h.status === 'CIFRADO' ? 'warn' : 'error';
+      addLine(`  HOP ${i}:  ${h.node.padEnd(20)} ${h.ip.padEnd(20)} ${h.latency.padEnd(10)} [${h.status}]`, stCls === 'success' ? '' : stCls);
+    }
+
+    addLine('  ═══════════════════════════════════════════════════════','dim');
+    addLine('');
+    addLine('  Resultado: Origen parcialmente identificado.','warn');
+    addLine('  La señal pasa por al menos 2 nodos ofuscados.','');
+    addLine('  IP parcial del último nodo visible: 198.51.100.47','info');
+    addLine('');
+    addLine('  ⚠ Para continuar la investigación, sería necesario acceder','warn');
+    addLine('  al nodo 198.51.100.47 e inspeccionar sus registros.','warn');
+    addLine('');
+  } else {
+    await sleep(400);
+    addLine('  Señal estándar. Origen: ' + randIP(),'');
+    addLine('  Clasificación: No maliciosa.','dim');addLine('');
+  }
+  inputLocked = false;
+}
+
+// ─── FORENSIC COMMAND ───
+async function cmdForensic(args) {
+  if (currentMode !== 'emergency') {
+    addLine('');addLine('  [ACCESO DENEGADO] Requiere nivel 7 (EMERGENCIA).','error');addLine('');return;
+  }
+  const target = args.trim().toLowerCase();
+  if (!['memory','disk','network','process','all'].includes(target)) {
+    addLine('');addLine('  Uso: forensic [memory | disk | network | process | all]','error');addLine('');return;
+  }
+  inputLocked = true;
+  addLine('');addLine(`  [FORENSIC] Analizando: ${target.toUpperCase()}...`,'warn');
+  await sleep(600);
+  addLine('  ─────────────────────────────────────','dim');
+
+  if (target === 'memory' || target === 'all') {
+    addLine('  MEMORIA: 3 regiones con escritura no autorizada detectadas','error');
+    addLine('           addr: 0x00FF_A000 — 0x00FF_AAAB (2731B, payload señal)','dim');
+    await sleep(200);
+  }
+  if (target === 'disk' || target === 'all') {
+    addLine('  DISCO:   Logs parcialmente sobrescritos en /var/log/sigint/','warn');
+    addLine('           Sectores afectados: 47. Blackbox intacto.','dim');
+    await sleep(200);
+  }
+  if (target === 'network' || target === 'all') {
+    addLine('  RED:     1 conexión saliente no autorizada (bloqueada por firewall)','error');
+    addLine('           Destino: 198.51.100.47:4739 — Proto: UNKNOWN','dim');
+    await sleep(200);
+  }
+  if (target === 'process' || target === 'all') {
+    addLine('  PROCESO: PID 6671 (sigint_override) — Estado: CONGELADO','warn');
+    addLine('           Ejecutable no firmado. Origen: payload de señal.','dim');
+    await sleep(200);
+  }
+
+  addLine('  ─────────────────────────────────────','dim');
+  addLine('');
+  inputLocked = false;
+}
+
+// ─── SIGNAL.LOCK COMMAND ───
+async function cmdSignalLock(args) {
+  if (currentMode !== 'emergency') {
+    addLine('');addLine('  [ACCESO DENEGADO] Requiere nivel 7 (EMERGENCIA).','error');addLine('');return;
+  }
+  const parts = args.trim().split(/\s+/);
+  if (parts.length < 2) {
+    addLine('');addLine('  Uso: signal.lock [signal_id] [on | off]','error');addLine('');return;
+  }
+  addLine('');
+  addLine(`  [SIGNAL.LOCK] ${parts[1].toUpperCase()} — ${parts[0]}`, parts[1].toLowerCase()==='on' ? 'warn' : 'success');
+  if (parts[1].toLowerCase() === 'on') {
+    addLine('  DSP dedicando recursos exclusivos al seguimiento.','dim');
+  } else {
+    addLine('  Seguimiento liberado. DSP en modo compartido.','dim');
+  }
+  addLine('');
+}
+
+// ─── HEADER AND MAIN LOOP ───
+async function renderHeader() {
+  if (currentMode === 'emergency') {
+    // re-render emergency header
+    const h1 = document.createElement('div');h1.className='header-line';h1.style.color='var(--amber)';
+    h1.textContent='⚠  MODO DE EMERGENCIA — SESIÓN OVERRIDE ACTIVA  ⚠';T.appendChild(h1);
+    const h2 = document.createElement('div');h2.className='header-line';h2.style.color='var(--amber-dim)';
+    h2.textContent='OPERADOR: em_override    NIVEL: 7/7    TODAS LAS ACCIONES QUEDAN REGISTRADAS';T.appendChild(h2);
+    const sep = document.createElement('div');sep.className='separator';sep.style.color='var(--amber-dark)';sep.textContent='═'.repeat(72);T.appendChild(sep);
+    addLine('');return;
+  }
+  const h1=document.createElement('div');h1.className='header-line';
+  h1.textContent='SECCIÓN DE INTELIGENCIA DE SEÑALES — TERMINAL DE OPERACIONES';T.appendChild(h1);
+  const h2=document.createElement('div');h2.className='header-line copyright';
+  h2.textContent='© Departamento de Defensa    UBICACIÓN: [CLASIFICADO]    VERSIÓN: ████.██';T.appendChild(h2);
+  const h3=document.createElement('div');h3.className='header-line copyright';
+  h3.textContent='NODO: '+randHex(8).toUpperCase()+'    SESIÓN: '+randHex(12).toUpperCase()+'    NIVEL SEGURIDAD: MÁXIMO';T.appendChild(h3);
+  const sep=document.createElement('div');sep.className='separator';sep.textContent='═'.repeat(72);T.appendChild(sep);
+  const hint=document.createElement('div');hint.className='output-line dim';
+  hint.textContent='  Escriba "help" para ver los comandos disponibles.';T.appendChild(hint);
+  addLine('');
+}
+
+async function main() {
+  await renderHeader();
+  while(true){
+    if(systemCorrupted) return;
+    const cmd = await createPrompt();
+    const clean = cmd.trim();
+    const cleanLower = clean.toLowerCase();
+    const cleanNoSpace = cmd.replace(/\s+/g,'').toLowerCase();
+    if(!cleanLower) continue;
+
+    // Commands with arguments
+    const firstWord = cleanLower.split(/\s+/)[0];
+    const restArgs = clean.substring(firstWord.length).trim();
+
+    if(COMMANDS[cleanLower]){ await COMMANDS[cleanLower].fn(); }
+    else if(cleanNoSpace === 'local.me-->change.session') { await cmdChangeSession(); }
+    else if(firstWord === 'scan') { await cmdScan(restArgs); }
+    else if(firstWord === 'decode') { await cmdDecode(restArgs); }
+    else if(firstWord === 'spectra') { await cmdSpectra(restArgs); }
+    else if(firstWord === 'deepdecode') { await cmdDeepdecode(restArgs); }
+    else if(firstWord === 'quarantine') { await cmdQuarantine(restArgs); }
+    else if(firstWord === 'traceback') { await cmdTraceback(restArgs); }
+    else if(firstWord === 'forensic') { await cmdForensic(restArgs); }
+    else if(firstWord === 'blackbox') { await cmdBlackbox(restArgs); }
+    else if(firstWord === 'signal.lock') { await cmdSignalLock(restArgs); }
+    else if(cleanLower==='exit'||cleanLower==='quit'){addLine('');addLine('  [ACCESO DENEGADO] No tiene permisos para cerrar esta sesión.','error');addLine('');}
+    else {addLine('');addLine(`  Comando no reconocido: "${cleanLower}"`,'error');addLine('  Escriba "help" para ver los comandos disponibles.','dim');addLine('');}
+  }
+}
+
+main();
+</script>
+</body>
+</html>
